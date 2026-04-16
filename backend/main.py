@@ -165,6 +165,7 @@ def build_initial_state(message: str) -> dict[str, Any]:
         "question": message,
         "documents": [],
         "generation": "",
+        "requires_web": False,
         "fallback": False,
         "top_score": 0.0,
         "evidence_ok": False,
