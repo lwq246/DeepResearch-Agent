@@ -1,8 +1,11 @@
 import json
 import re
 from datetime import date, timedelta
+from functools import wraps
 from math import sqrt
 from typing import Any, Literal, Sequence
+
+import logfire
 
 try:
     from .configuration import bool_env
@@ -42,6 +45,53 @@ except ImportError:
     from graph_utils import append_trace
     from graph_utils import safe_float
     from graph_utils import unwrap_metadata
+
+
+def traced_node(node_name: str):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(state: GraphState) -> dict[str, Any]:
+            documents = state.get("documents", [])
+            with logfire.span(
+                f"node.{node_name}",
+                question=str(state.get("question", ""))[:200],
+                react_step=int(state.get("react_step", 0)),
+                web_attempts=int(state.get("web_attempts", 0)),
+                documents_count=len(documents) if isinstance(documents, list) else 0,
+            ):
+                logfire.info(
+                    "node_started",
+                    node=node_name,
+                    node_trace=True,
+                    react_step=int(state.get("react_step", 0)),
+                    web_attempts=int(state.get("web_attempts", 0)),
+                )
+                try:
+                    result = func(state)
+                except Exception as exc:
+                    logfire.info(
+                        "node_failed",
+                        node=node_name,
+                        node_trace=True,
+                        error_type=type(exc).__name__,
+                        error_message=str(exc)[:240],
+                    )
+                    raise
+                result_documents = result.get("documents", []) if isinstance(result, dict) else []
+                logfire.info(
+                    "node_completed",
+                    node=node_name,
+                    node_trace=True,
+                    updated_keys=sorted(result.keys()) if isinstance(result, dict) else [],
+                    fallback=bool(result.get("fallback", False)) if isinstance(result, dict) else False,
+                    evidence_ok=bool(result.get("evidence_ok", False)) if isinstance(result, dict) else False,
+                    result_documents_count=len(result_documents) if isinstance(result_documents, list) else 0,
+                )
+                return result
+
+        return wrapper
+
+    return decorator
 
 
 def parse_json_object(raw_text: str) -> dict[str, Any] | None:
@@ -333,6 +383,7 @@ def score_web_documents(question: str, web_documents: list[dict[str, Any]]) -> l
     return scored_documents
 
 
+@traced_node("react_plan")
 def react_plan(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
@@ -401,6 +452,7 @@ def route_react_action(state: GraphState) -> Literal["retrieve", "web_search", "
     return "build_context"
 
 
+@traced_node("retrieve")
 def retrieve(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     vector_store = get_vector_store()
@@ -475,6 +527,7 @@ def retrieve(state: GraphState) -> dict[str, Any]:
     }
 
 
+@traced_node("web_search")
 def web_search(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     existing_documents = state.get("documents", [])
@@ -515,6 +568,7 @@ def web_search(state: GraphState) -> dict[str, Any]:
     }
 
 
+@traced_node("validate_evidence")
 def validate_evidence(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
@@ -604,6 +658,7 @@ def route_after_validation(state: GraphState) -> Literal["react_plan", "build_co
     return "build_context"
 
 
+@traced_node("build_context")
 def build_context(state: GraphState) -> dict[str, Any]:
     documents = state.get("documents", [])
     if not documents:
@@ -662,6 +717,7 @@ def build_context(state: GraphState) -> dict[str, Any]:
     }
 
 
+@traced_node("generate")
 def generate(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])

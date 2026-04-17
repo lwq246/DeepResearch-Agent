@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
+
+import logfire
 
 try:
     from .configuration import get_reflection_llm
@@ -65,6 +68,21 @@ DEFAULT_EVAL_SET: list[dict[str, Any]] = [
         "expected_keywords": ["grounded", "sources", "supported"],
     },
 ]
+
+
+def configure_logfire() -> None:
+    enabled = os.getenv("LOGFIRE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    if not enabled:
+        return
+
+    service_name = os.getenv("LOGFIRE_SERVICE_NAME", "arxiv-rag-agent-stream-demo")
+    try:
+        logfire.configure(service_name=service_name)
+        logfire.instrument_openai()
+        logfire.instrument_pydantic()
+        logfire.info("logfire_configured", service_name=service_name)
+    except Exception as exc:
+        print(f"[observability] logfire setup failed: {exc}")
 
 
 def build_initial_state(question: str) -> dict[str, Any]:
@@ -226,42 +244,52 @@ def llm_judge_answer(
     sources: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
     llm = get_reflection_llm()
-    response = llm.invoke(
-        [
-            (
-                "system",
-                "You are a strict RAG evaluator. Return JSON only with keys: "
-                "correct (bool), grounded (bool), correctness_score (0..1), faithfulness_score (0..1), reason (string).",
-            ),
-            (
-                "human",
+    with logfire.span("llm_judge_answer", question=question):
+        response = llm.invoke(
+            [
                 (
-                    f"Question: {question}\n"
-                    f"Expected answer guidance: {expected}\n"
-                    f"Candidate answer: {answer}\n"
-                    f"Sources (JSON): {json.dumps(sources[:5], ensure_ascii=True)}\n"
-                    "Rules: correctness compares candidate to expected guidance. "
-                    "grounded means claims are plausibly supported by the given sources. "
-                    "Do not include markdown, only JSON."
+                    "system",
+                    "You are a strict RAG evaluator. Return JSON only with keys: "
+                    "correct (bool), grounded (bool), correctness_score (0..1), faithfulness_score (0..1), reason (string).",
                 ),
-            ),
-        ]
-    )
+                (
+                    "human",
+                    (
+                        f"Question: {question}\n"
+                        f"Expected answer guidance: {expected}\n"
+                        f"Candidate answer: {answer}\n"
+                        f"Sources (JSON): {json.dumps(sources[:5], ensure_ascii=True)}\n"
+                        "Rules: correctness compares candidate to expected guidance. "
+                        "grounded means claims are plausibly supported by the given sources. "
+                        "Do not include markdown, only JSON."
+                    ),
+                ),
+            ]
+        )
     response_text = response.content if isinstance(response.content, str) else str(response.content)
     parsed = parse_json_object(response_text)
     if not parsed:
+        logfire.info("llm_judge_unparseable_response")
         return None
 
     correctness_score = clamp01(float(parsed.get("correctness_score", 0.0)))
     faithfulness_score = clamp01(float(parsed.get("faithfulness_score", 0.0)))
 
-    return {
+    judged = {
         "correct": bool(parsed.get("correct", correctness_score >= 0.6)),
         "grounded": bool(parsed.get("grounded", faithfulness_score >= 0.6)),
         "correctness_score": round(correctness_score, 3),
         "faithfulness_score": round(faithfulness_score, 3),
         "reason": str(parsed.get("reason", "")).strip(),
     }
+    logfire.info(
+        "llm_judge_completed",
+        correct=judged["correct"],
+        grounded=judged["grounded"],
+        correctness_score=judged["correctness_score"],
+        faithfulness_score=judged["faithfulness_score"],
+    )
+    return judged
 
 
 def evaluate_answer(
@@ -323,101 +351,118 @@ def run_stream(
     json_out: str | None = None,
     verbose: bool = True,
 ) -> dict[str, Any]:
-    state = build_initial_state(question)
-    config = {"configurable": {"thread_id": thread_id}}
-    visited_nodes: list[str] = []
-    node_deltas: list[dict[str, Any]] = []
-    fallback_true_events = 0
-    react_plan_visits = 0
-    web_search_visits = 0
+    with logfire.span("run_stream", question=question, thread_id=thread_id):
+        state = build_initial_state(question)
+        config = {"configurable": {"thread_id": thread_id}}
+        visited_nodes: list[str] = []
+        node_deltas: list[dict[str, Any]] = []
+        fallback_true_events = 0
+        react_plan_visits = 0
+        web_search_visits = 0
 
-    if verbose:
-        print(f"Question: {question}")
-        print("Streaming node updates...\n")
-
-    for event in graph.stream(state, config=config, stream_mode="updates"):
-        if not isinstance(event, dict):
-            continue
-        for node_name, update in event.items():
-            node_name_str = str(node_name)
-            visited_nodes.append(node_name_str)
-            if node_name_str == "react_plan":
-                react_plan_visits += 1
-            if node_name_str == "web_search":
-                web_search_visits += 1
-
-            if verbose:
-                print(f"[{node_name}]")
-            if isinstance(update, dict):
-                before = dict(state)
-                if verbose:
-                    print(summarize_update(update))
-                state.update(update)
-                updated_keys = sorted(update.keys())
-                if bool(update.get("fallback", False)):
-                    fallback_true_events += 1
-
-                node_deltas.append(
-                    {
-                        "node": node_name_str,
-                        "updated_keys": updated_keys,
-                        "delta": state_delta(before, state, updated_keys),
-                    }
-                )
-            else:
-                if verbose:
-                    print({"value": str(update)})
-                node_deltas.append(
-                    {
-                        "node": node_name_str,
-                        "updated_keys": [],
-                        "delta": {"value": str(update)},
-                    }
-                )
-            if verbose:
-                print("-" * 60)
-
-    if verbose:
-        print("\nFinal answer:\n")
-        print(state.get("generation", ""))
-        print("\nFinal trace:")
-        for line in state.get("react_trace", []):
-            print(f"- {line}")
-
-    retry_summary = {
-        "react_plan_visits": react_plan_visits,
-        "web_search_visits": web_search_visits,
-        "web_retry_loops": max(0, web_search_visits - 1),
-        "fallback_true_events": fallback_true_events,
-    }
-
-    report = {
-        "question": question,
-        "thread_id": thread_id,
-        "visited_nodes": visited_nodes,
-        "node_deltas": node_deltas,
-        "retry_summary": retry_summary,
-        "final_answer": str(state.get("generation", "")),
-        "final_sources": serialize_sources(state.get("documents", [])),
-        "final_state": {
-            "requires_web": bool(state.get("requires_web", False)),
-            "fallback": bool(state.get("fallback", False)),
-            "evidence_ok": bool(state.get("evidence_ok", False)),
-            "web_attempts": int(state.get("web_attempts", 0)),
-            "react_step": int(state.get("react_step", 0)),
-            "top_score": float(state.get("top_score", 0.0)),
-            "trace": state.get("react_trace", []),
-        },
-    }
-
-    if json_out:
-        out_path = Path(json_out)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
         if verbose:
-            print(f"\nSaved trace report to: {out_path}")
+            print(f"Question: {question}")
+            print("Streaming node updates...\n")
 
-    return report
+        for event in graph.stream(state, config=config, stream_mode="updates"):
+            if not isinstance(event, dict):
+                continue
+            for node_name, update in event.items():
+                node_name_str = str(node_name)
+                visited_nodes.append(node_name_str)
+                if node_name_str == "react_plan":
+                    react_plan_visits += 1
+                if node_name_str == "web_search":
+                    web_search_visits += 1
+
+                if verbose:
+                    print(f"[{node_name}]")
+                if isinstance(update, dict):
+                    before = dict(state)
+                    if verbose:
+                        print(summarize_update(update))
+                    state.update(update)
+                    updated_keys = sorted(update.keys())
+                    if bool(update.get("fallback", False)):
+                        fallback_true_events += 1
+
+                    node_deltas.append(
+                        {
+                            "node": node_name_str,
+                            "updated_keys": updated_keys,
+                            "delta": state_delta(before, state, updated_keys),
+                        }
+                    )
+                    logfire.info(
+                        "run_stream_node_update",
+                        node=node_name_str,
+                        updated_keys=updated_keys,
+                        fallback_event=bool(update.get("fallback", False)),
+                    )
+                else:
+                    if verbose:
+                        print({"value": str(update)})
+                    node_deltas.append(
+                        {
+                            "node": node_name_str,
+                            "updated_keys": [],
+                            "delta": {"value": str(update)},
+                        }
+                    )
+                    logfire.info("run_stream_node_value", node=node_name_str)
+                if verbose:
+                    print("-" * 60)
+
+        if verbose:
+            print("\nFinal answer:\n")
+            print(state.get("generation", ""))
+            print("\nFinal trace:")
+            for line in state.get("react_trace", []):
+                print(f"- {line}")
+
+        retry_summary = {
+            "react_plan_visits": react_plan_visits,
+            "web_search_visits": web_search_visits,
+            "web_retry_loops": max(0, web_search_visits - 1),
+            "fallback_true_events": fallback_true_events,
+        }
+
+        report = {
+            "question": question,
+            "thread_id": thread_id,
+            "visited_nodes": visited_nodes,
+            "node_deltas": node_deltas,
+            "retry_summary": retry_summary,
+            "final_answer": str(state.get("generation", "")),
+            "final_sources": serialize_sources(state.get("documents", [])),
+            "final_state": {
+                "requires_web": bool(state.get("requires_web", False)),
+                "fallback": bool(state.get("fallback", False)),
+                "evidence_ok": bool(state.get("evidence_ok", False)),
+                "web_attempts": int(state.get("web_attempts", 0)),
+                "react_step": int(state.get("react_step", 0)),
+                "top_score": float(state.get("top_score", 0.0)),
+                "trace": state.get("react_trace", []),
+            },
+        }
+
+        if json_out:
+            out_path = Path(json_out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            if verbose:
+                print(f"\nSaved trace report to: {out_path}")
+
+        logfire.info(
+            "run_stream_completed",
+            visited_nodes_count=len(visited_nodes),
+            web_retry_loops=retry_summary["web_retry_loops"],
+            fallback=report["final_state"]["fallback"],
+            evidence_ok=report["final_state"]["evidence_ok"],
+            web_attempts=report["final_state"]["web_attempts"],
+            sources_count=len(report["final_sources"]),
+        )
+        return report
 
 
 def run_eval(
@@ -426,82 +471,93 @@ def run_eval(
     use_llm_judge: bool = False,
     traces_dir: str | None = None,
 ) -> dict[str, Any]:
-    results: list[dict[str, Any]] = []
+    with logfire.span("run_eval", eval_size=len(eval_set), llm_judge=use_llm_judge):
+        results: list[dict[str, Any]] = []
 
-    for index, item in enumerate(eval_set, start=1):
-        question = str(item.get("question", "")).strip()
-        if not question:
-            continue
+        for index, item in enumerate(eval_set, start=1):
+            question = str(item.get("question", "")).strip()
+            if not question:
+                continue
 
-        expected = str(item.get("expected", "")).strip()
-        expected_keywords = to_keyword_list(item.get("expected_keywords", []))
-        thread_id = f"{thread_prefix}-{index}"
+            expected = str(item.get("expected", "")).strip()
+            expected_keywords = to_keyword_list(item.get("expected_keywords", []))
+            thread_id = f"{thread_prefix}-{index}"
 
-        json_out: str | None = None
-        if traces_dir:
-            json_out = str(Path(traces_dir) / f"trace_{index:02d}.json")
+            json_out: str | None = None
+            if traces_dir:
+                json_out = str(Path(traces_dir) / f"trace_{index:02d}.json")
 
-        report = run_stream(
-            question=question,
-            thread_id=thread_id,
-            json_out=json_out,
-            verbose=False,
-        )
-        evaluation = evaluate_answer(
-            question=question,
-            answer=str(report.get("final_answer", "")),
-            sources=report.get("final_sources", []),
-            expected=expected,
-            expected_keywords=expected_keywords,
-            use_llm_judge=use_llm_judge,
-        )
+            report = run_stream(
+                question=question,
+                thread_id=thread_id,
+                json_out=json_out,
+                verbose=False,
+            )
+            evaluation = evaluate_answer(
+                question=question,
+                answer=str(report.get("final_answer", "")),
+                sources=report.get("final_sources", []),
+                expected=expected,
+                expected_keywords=expected_keywords,
+                use_llm_judge=use_llm_judge,
+            )
 
-        retries = int(report.get("retry_summary", {}).get("web_retry_loops", 0))
-        fallback = bool(report.get("final_state", {}).get("fallback", False))
+            retries = int(report.get("retry_summary", {}).get("web_retry_loops", 0))
+            fallback = bool(report.get("final_state", {}).get("fallback", False))
 
-        item_result = {
-            "question": question,
-            "expected": expected,
-            "thread_id": thread_id,
-            "retries": retries,
-            "fallback": fallback,
-            "evaluation": evaluation,
-            "final_answer": report.get("final_answer", ""),
-            "final_sources": report.get("final_sources", []),
+            item_result = {
+                "question": question,
+                "expected": expected,
+                "thread_id": thread_id,
+                "retries": retries,
+                "fallback": fallback,
+                "evaluation": evaluation,
+                "final_answer": report.get("final_answer", ""),
+                "final_sources": report.get("final_sources", []),
+            }
+            results.append(item_result)
+
+            print(
+                f"[{index}/{len(eval_set)}] score={evaluation['score']:.3f} "
+                f"correct={evaluation['correct']} grounded={evaluation['grounded']} "
+                f"retries={retries} fallback={fallback}"
+            )
+
+        total = len(results)
+        correct_count = sum(1 for row in results if bool(row["evaluation"]["correct"]))
+        grounded_count = sum(1 for row in results if bool(row["evaluation"]["grounded"]))
+        total_retries = sum(int(row["retries"]) for row in results)
+        fallback_count = sum(1 for row in results if bool(row["fallback"]))
+        avg_score = sum(float(row["evaluation"]["score"]) for row in results) / total if total else 0.0
+
+        metrics = {
+            "num_examples": total,
+            "accuracy": round(correct_count / total, 3) if total else 0.0,
+            "grounded_rate": round(grounded_count / total, 3) if total else 0.0,
+            "avg_score": round(avg_score, 3),
+            "avg_retries": round(total_retries / total, 3) if total else 0.0,
+            "fallback_rate": round(fallback_count / total, 3) if total else 0.0,
+            "judge_mode": "llm_judge" if use_llm_judge else "heuristic",
         }
-        results.append(item_result)
 
-        print(
-            f"[{index}/{len(eval_set)}] score={evaluation['score']:.3f} "
-            f"correct={evaluation['correct']} grounded={evaluation['grounded']} "
-            f"retries={retries} fallback={fallback}"
+        summary = {
+            "metrics": metrics,
+            "results": results,
+        }
+
+        logfire.info(
+            "run_eval_completed",
+            num_examples=metrics["num_examples"],
+            accuracy=metrics["accuracy"],
+            grounded_rate=metrics["grounded_rate"],
+            avg_score=metrics["avg_score"],
+            avg_retries=metrics["avg_retries"],
+            fallback_rate=metrics["fallback_rate"],
+            judge_mode=metrics["judge_mode"],
         )
-
-    total = len(results)
-    correct_count = sum(1 for row in results if bool(row["evaluation"]["correct"]))
-    grounded_count = sum(1 for row in results if bool(row["evaluation"]["grounded"]))
-    total_retries = sum(int(row["retries"]) for row in results)
-    fallback_count = sum(1 for row in results if bool(row["fallback"]))
-    avg_score = sum(float(row["evaluation"]["score"]) for row in results) / total if total else 0.0
-
-    metrics = {
-        "num_examples": total,
-        "accuracy": round(correct_count / total, 3) if total else 0.0,
-        "grounded_rate": round(grounded_count / total, 3) if total else 0.0,
-        "avg_score": round(avg_score, 3),
-        "avg_retries": round(total_retries / total, 3) if total else 0.0,
-        "fallback_rate": round(fallback_count / total, 3) if total else 0.0,
-        "judge_mode": "llm_judge" if use_llm_judge else "heuristic",
-    }
-
-    summary = {
-        "metrics": metrics,
-        "results": results,
-    }
-
-    print("\nEvaluation summary:")
-    print(json.dumps(metrics, indent=2))
-    return summary
+        print("\nEvaluation summary:")
+        print(json.dumps(metrics, indent=2))
+        return summary
 
 
 def main() -> None:
@@ -537,6 +593,7 @@ def main() -> None:
         help="Run only the first N eval examples (0 means all)",
     )
     args = parser.parse_args()
+    configure_logfire()
 
     if args.run_eval:
         eval_set = DEFAULT_EVAL_SET[: args.max_eval] if args.max_eval > 0 else DEFAULT_EVAL_SET

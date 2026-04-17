@@ -2,6 +2,7 @@ import os
 from typing import Any
 
 import fitz
+import logfire
 from fastapi import FastAPI
 from fastapi import File
 from fastapi import HTTPException
@@ -47,6 +48,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def configure_logfire(app_instance: FastAPI) -> None:
+    service_name = "rag-agent"
+    try:
+        logfire.configure(service_name=service_name)
+        logfire.instrument_fastapi(app_instance)
+        logfire.instrument_pydantic()
+        logfire.instrument_openai()
+        logfire.info("logfire_configured", service_name=service_name)
+    except Exception as exc:
+        # Keep the API available if observability configuration fails.
+        print(f"[observability] logfire setup failed: {exc}", flush=True)
+
+
+configure_logfire(app)
 
 
 def openai_client_kwargs() -> dict[str, str]:
@@ -215,147 +232,182 @@ async def health() -> dict[str, str]:
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
-    result = lang_graph.invoke(build_initial_state(request.message))
-    return ChatResponse(answer=result.get("generation", ""), sources=result.get("documents", []))
+    with logfire.span("chat", message=request.message):
+        result = lang_graph.invoke(build_initial_state(request.message))
+        answer = result.get("generation", "")
+        sources = result.get("documents", [])
+        logfire.info(
+            "chat_completed",
+            answer_chars=len(str(answer)),
+            sources_count=len(sources) if isinstance(sources, list) else 0,
+        )
+        return ChatResponse(answer=answer, sources=sources)
 
 
 @app.post("/chat/debug", response_model=ChatDebugResponse)
 async def chat_debug(request: ChatRequest) -> ChatDebugResponse:
-    result = lang_graph.invoke(build_initial_state(request.message))
-    return ChatDebugResponse(
-        answer=result.get("generation", ""),
-        sources=result.get("documents", []),
-        trace=result.get("react_trace", []),
-        top_score=float(result.get("top_score", 0.0)),
-        evidence_ok=bool(result.get("evidence_ok", False)),
-        web_attempts=int(result.get("web_attempts", 0)),
-        fallback=bool(result.get("fallback", False)),
-    )
+    with logfire.span("chat_debug", message=request.message):
+        result = lang_graph.invoke(build_initial_state(request.message))
+        response = ChatDebugResponse(
+            answer=result.get("generation", ""),
+            sources=result.get("documents", []),
+            trace=result.get("react_trace", []),
+            top_score=float(result.get("top_score", 0.0)),
+            evidence_ok=bool(result.get("evidence_ok", False)),
+            web_attempts=int(result.get("web_attempts", 0)),
+            fallback=bool(result.get("fallback", False)),
+        )
+        logfire.info(
+            "chat_debug_completed",
+            top_score=response.top_score,
+            evidence_ok=response.evidence_ok,
+            web_attempts=response.web_attempts,
+            fallback=response.fallback,
+        )
+        return response
 
 
 @app.post("/chat/stream-debug", response_model=ChatStreamDebugResponse)
 async def chat_stream_debug(request: ChatRequest) -> ChatStreamDebugResponse:
-    state = build_initial_state(request.message)
-    visited_nodes: list[str] = []
-    node_updates: list[NodeUpdate] = []
+    with logfire.span("chat_stream_debug", message=request.message):
+        state = build_initial_state(request.message)
+        visited_nodes: list[str] = []
+        node_updates: list[NodeUpdate] = []
 
-    for event in lang_graph.stream(state, stream_mode="updates"):
-        if not isinstance(event, dict):
-            continue
-        for node_name, update in event.items():
-            visited_nodes.append(str(node_name))
-            if isinstance(update, dict):
-                state.update(update)
-                node_updates.append(
-                    NodeUpdate(
-                        node=str(node_name),
-                        updated_keys=sorted(update.keys()),
-                        summary=summarize_node_update(update),
+        for event in lang_graph.stream(state, stream_mode="updates"):
+            if not isinstance(event, dict):
+                continue
+            for node_name, update in event.items():
+                visited_nodes.append(str(node_name))
+                if isinstance(update, dict):
+                    state.update(update)
+                    node_updates.append(
+                        NodeUpdate(
+                            node=str(node_name),
+                            updated_keys=sorted(update.keys()),
+                            summary=summarize_node_update(update),
+                        )
                     )
-                )
-            else:
-                node_updates.append(
-                    NodeUpdate(
-                        node=str(node_name),
-                        updated_keys=[],
-                        summary={"value": str(update)},
+                else:
+                    node_updates.append(
+                        NodeUpdate(
+                            node=str(node_name),
+                            updated_keys=[],
+                            summary={"value": str(update)},
+                        )
                     )
-                )
 
-    return ChatStreamDebugResponse(
-        answer=str(state.get("generation", "")),
-        sources=state.get("documents", []),
-        trace=state.get("react_trace", []),
-        top_score=float(state.get("top_score", 0.0)),
-        evidence_ok=bool(state.get("evidence_ok", False)),
-        web_attempts=int(state.get("web_attempts", 0)),
-        fallback=bool(state.get("fallback", False)),
-        visited_nodes=visited_nodes,
-        node_updates=node_updates,
-    )
+        response = ChatStreamDebugResponse(
+            answer=str(state.get("generation", "")),
+            sources=state.get("documents", []),
+            trace=state.get("react_trace", []),
+            top_score=float(state.get("top_score", 0.0)),
+            evidence_ok=bool(state.get("evidence_ok", False)),
+            web_attempts=int(state.get("web_attempts", 0)),
+            fallback=bool(state.get("fallback", False)),
+            visited_nodes=visited_nodes,
+            node_updates=node_updates,
+        )
+        logfire.info(
+            "chat_stream_debug_completed",
+            visited_nodes_count=len(visited_nodes),
+            node_updates_count=len(node_updates),
+            evidence_ok=response.evidence_ok,
+            web_attempts=response.web_attempts,
+            fallback=response.fallback,
+        )
+        return response
 
 
 @app.post("/upload-pdf", response_model=UploadPdfResponse)
 async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
-    filename = file.filename or "uploaded.pdf"
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Only PDF files are supported.")
+    with logfire.span("upload_pdf", filename=file.filename or "uploaded.pdf"):
+        filename = file.filename or "uploaded.pdf"
+        if not filename.lower().endswith(".pdf"):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    pdf_bytes = await file.read()
-    if not pdf_bytes:
-        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+        pdf_bytes = await file.read()
+        if not pdf_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-    max_pdf_pages = int(os.getenv("UPLOAD_MAX_PDF_PAGES", "30"))
-    chunk_size = int(os.getenv("ARXIV_CHUNK_SIZE", "800"))
-    chunk_overlap = int(os.getenv("ARXIV_CHUNK_OVERLAP", "100"))
-    include_sections_csv = os.getenv(
-        "ARXIV_INCLUDE_SECTIONS",
-        (
-            "abstract,introduction,background,related work,method,methodology,approach,"
-            "experiment,experiments,results,discussion,conclusion,limitations"
-        ),
-    )
-    exclude_sections_csv = os.getenv(
-        "ARXIV_EXCLUDE_SECTIONS",
-        "references,acknowledgements,acknowledgments,appendix",
-    )
-    fallback_section_keywords_csv = os.getenv(
-        "ARXIV_FALLBACK_SECTION_KEYWORDS",
-        "abstract,introduction,method,approach,experiment,results,conclusion",
-    )
-
-    extracted_text = extract_pdf_text(pdf_bytes=pdf_bytes, max_pages=max_pdf_pages)
-    if not extracted_text:
-        raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
-
-    source_value = f"upload://{filename}"
-    documents = build_upload_documents(
-        filename=filename,
-        source_value=source_value,
-        extracted_text=extracted_text,
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        include_sections_csv=include_sections_csv,
-        exclude_sections_csv=exclude_sections_csv,
-        fallback_section_keywords_csv=fallback_section_keywords_csv,
-    )
-    if not documents:
-        raise HTTPException(status_code=400, detail="Failed to split PDF into section-aware chunks.")
-
-    embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
-    embeddings = OpenAIEmbeddings(model=embedding_model, **openai_client_kwargs())
-
-    print_upload_summary(
-        filename=filename,
-        source_value=source_value,
-        documents=documents,
-        collection_name=collection_name,
-    )
-
-    try:
-        vector_store = QdrantVectorStore.from_existing_collection(
-            embedding=embeddings,
-            collection_name=collection_name,
-            url=qdrant_url,
-            content_payload_key="page_content",
-            metadata_payload_key="metadata",
+        max_pdf_pages = int(os.getenv("UPLOAD_MAX_PDF_PAGES", "30"))
+        chunk_size = int(os.getenv("ARXIV_CHUNK_SIZE", "800"))
+        chunk_overlap = int(os.getenv("ARXIV_CHUNK_OVERLAP", "100"))
+        include_sections_csv = os.getenv(
+            "ARXIV_INCLUDE_SECTIONS",
+            (
+                "abstract,introduction,background,related work,method,methodology,approach,"
+                "experiment,experiments,results,discussion,conclusion,limitations"
+            ),
         )
-        vector_store.add_documents(documents)
-    except Exception:
-        QdrantVectorStore.from_documents(
+        exclude_sections_csv = os.getenv(
+            "ARXIV_EXCLUDE_SECTIONS",
+            "references,acknowledgements,acknowledgments,appendix",
+        )
+        fallback_section_keywords_csv = os.getenv(
+            "ARXIV_FALLBACK_SECTION_KEYWORDS",
+            "abstract,introduction,method,approach,experiment,results,conclusion",
+        )
+
+        extracted_text = extract_pdf_text(pdf_bytes=pdf_bytes, max_pages=max_pdf_pages)
+        if not extracted_text:
+            raise HTTPException(status_code=400, detail="No extractable text found in PDF.")
+
+        source_value = f"upload://{filename}"
+        documents = build_upload_documents(
+            filename=filename,
+            source_value=source_value,
+            extracted_text=extracted_text,
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            include_sections_csv=include_sections_csv,
+            exclude_sections_csv=exclude_sections_csv,
+            fallback_section_keywords_csv=fallback_section_keywords_csv,
+        )
+        if not documents:
+            raise HTTPException(status_code=400, detail="Failed to split PDF into section-aware chunks.")
+
+        embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+        qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
+        collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
+        embeddings = OpenAIEmbeddings(model=embedding_model, **openai_client_kwargs())
+
+        print_upload_summary(
+            filename=filename,
+            source_value=source_value,
             documents=documents,
-            embedding=embeddings,
             collection_name=collection_name,
-            url=qdrant_url,
-            content_payload_key="page_content",
-            metadata_payload_key="metadata",
         )
 
-    print(
-        f"[upload-pdf] stored chunks={len(documents)} in collection={collection_name} at {qdrant_url}",
-        flush=True,
-    )
+        try:
+            vector_store = QdrantVectorStore.from_existing_collection(
+                embedding=embeddings,
+                collection_name=collection_name,
+                url=qdrant_url,
+                content_payload_key="page_content",
+                metadata_payload_key="metadata",
+            )
+            vector_store.add_documents(documents)
+        except Exception:
+            logfire.info("upload_pdf_existing_collection_failed_create_new", collection_name=collection_name)
+            QdrantVectorStore.from_documents(
+                documents=documents,
+                embedding=embeddings,
+                collection_name=collection_name,
+                url=qdrant_url,
+                content_payload_key="page_content",
+                metadata_payload_key="metadata",
+            )
+
+        print(
+            f"[upload-pdf] stored chunks={len(documents)} in collection={collection_name} at {qdrant_url}",
+            flush=True,
+        )
+        logfire.info(
+            "upload_pdf_completed",
+            filename=filename,
+            chunks=len(documents),
+            collection_name=collection_name,
+        )
 
     return UploadPdfResponse(filename=filename, chunks_indexed=len(documents))
