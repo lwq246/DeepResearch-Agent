@@ -31,7 +31,7 @@ The LangGraph workflow in `backend/graph.py` is:
 
 This gives a deterministic control loop with LLM-assisted planning and reflection.
 
-### Workflow Graph
+## Workflow Graph
 
 ````mermaid
 flowchart TD
@@ -41,8 +41,8 @@ flowchart TD
     B --> D[validate_evidence]
     C --> D
 
-    D -->|route_after_validation (valid)| E[build_context]
-    D -->|route_after_validation (invalid / retry)| A
+    D -->|valid| E[build_context]
+    D -->|invalid_or_retry| A
 
     E --> F[generate]
     F --> G[END]
