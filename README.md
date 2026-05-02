@@ -33,7 +33,7 @@ This gives a deterministic control loop with LLM-assisted planning and reflectio
 
 ## Workflow Graph
 
-````mermaid
+```mermaid
 flowchart TD
     A[react_plan] -->|route_react_action| B[retrieve]
     A -->|route_react_action| C[web_search]
@@ -47,7 +47,7 @@ flowchart TD
     E --> F[generate]
     F --> G[END]
 
----
+```
 
 ## Repository Layout
 
@@ -64,7 +64,7 @@ flowchart TD
 ├── docker-compose.yml     # Qdrant service
 ├── run-dev.ps1            # One-command local startup
 └── run-dev.cmd            # Windows launcher
-````
+```
 
 ## Prerequisites
 
