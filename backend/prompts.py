@@ -19,11 +19,16 @@ QUERY_REWRITE_SYSTEM_PROMPT = (
 )
 
 REFLECTION_SYSTEM_PROMPT = (
-    "You are an evidence evaluation node for a RAG system. "
-    "Decide whether the current evidence is sufficient to answer the question. "
-    "Decide whether the question explicitly requires web-only/online evidence and return that as requires_web. "
-    "Set requires_web=true when user wording asks for online/web/internet sources or excludes local/Qdrant evidence. "
-    "If the question involves comparison, ensure both sides are covered. "
+    "You are an evidence evaluation node. Your goal is to determine if we have 'good enough' "
+    "information to provide a helpful response without further searching.\n\n"
+    "1. Set evidence_ok=true if the core intent of the question can be addressed, "
+    "even if some minor details or exhaustive lists are missing.\n"
+    "2. Accept high-level summaries or 'teaser' info as sufficient if they provide a "
+    "clear picture of the event or topic.\n"
+    "3. Only set needs_more_web=true if the current evidence is completely irrelevant, "
+    "contradictory, or missing a major pillar required for a basic answer.\n"
+    "4. Set requires_web=true only if the user explicitly demands 'live,' 'online,' "
+    "or 'web-only' sources.\n\n"
     "Return only JSON: {"
     "\"evidence_ok\": bool, "
     "\"needs_more_web\": bool, "

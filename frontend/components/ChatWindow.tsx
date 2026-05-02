@@ -69,7 +69,8 @@ export default function ChatWindow() {
     {
       id: "assistant-welcome",
       role: "assistant",
-      text: "Ask about an ML concept, paper trend, or architecture and I will respond using your indexed ArXiv corpus.",
+      text: "Ask me anything. You can also upload a PDF paper and ask questions about its content.",
+      // text: "Ask about an ML concept, paper trend, or architecture and I will respond using your indexed ArXiv corpus.",
     },
   ]);
   const [input, setInput] = useState("");
@@ -337,7 +338,7 @@ export default function ChatWindow() {
           value={input}
           onChange={(event) => setInput(event.target.value)}
           disabled={isSending}
-          placeholder="Ask about transformer scaling laws, RLHF, diffusion papers..."
+          placeholder="Ask about papers..."
           className="w-full rounded-xl border border-ink/20 bg-white px-4 py-3 text-sm outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 sm:text-base"
         />
         <button

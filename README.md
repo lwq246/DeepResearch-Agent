@@ -31,6 +31,24 @@ The LangGraph workflow in `backend/graph.py` is:
 
 This gives a deterministic control loop with LLM-assisted planning and reflection.
 
+### Workflow Graph
+
+````mermaid
+flowchart TD
+    A[react_plan] -->|route_react_action| B[retrieve]
+    A -->|route_react_action| C[web_search]
+
+    B --> D[validate_evidence]
+    C --> D
+
+    D -->|route_after_validation (valid)| E[build_context]
+    D -->|route_after_validation (invalid / retry)| A
+
+    E --> F[generate]
+    F --> G[END]
+
+---
+
 ## Repository Layout
 
 ```text
@@ -46,7 +64,7 @@ This gives a deterministic control loop with LLM-assisted planning and reflectio
 ├── docker-compose.yml     # Qdrant service
 ├── run-dev.ps1            # One-command local startup
 └── run-dev.cmd            # Windows launcher
-```
+````
 
 ## Prerequisites
 

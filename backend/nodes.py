@@ -316,6 +316,17 @@ def llm_reflect_evidence(
             if topic:
                 missing_topics.append(topic)
 
+    # By default, reflection can relax a strict heuristic but should not veto a passing baseline.
+    allow_reflection_downgrade = bool_env("LLM_REFLECTION_ALLOW_DOWNGRADE", False)
+    if default_evidence_ok and not evidence_ok and not allow_reflection_downgrade:
+        evidence_ok = True
+        requested_more_web = False
+        reason = (
+            f"{reason} | kept heuristic baseline (LLM_REFLECTION_ALLOW_DOWNGRADE=false)"
+            if reason
+            else "Kept heuristic baseline (LLM_REFLECTION_ALLOW_DOWNGRADE=false)."
+        )
+
     if web_attempts >= max_web_attempts:
         requested_more_web = False
 
@@ -582,7 +593,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     min_local_docs = int_env("MIN_LOCAL_DOCS", 2)
     min_web_docs = int_env("MIN_WEB_DOCS", 2)
     min_web_content_chars = int_env("MIN_WEB_CONTENT_CHARS", 200)
-    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD", 0.65)
+    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD", 0.45)
     max_web_attempts = int_env("MAX_WEB_ATTEMPTS", 2)
     web_attempts = int(state.get("web_attempts", 0))
 
