@@ -284,6 +284,7 @@ export default function ChatWindow() {
                       const href = sourceHref(source);
                       const title =
                         source.title || href || `Source ${sourceIndex + 1}`;
+                      const numberedTitle = `${sourceIndex + 1}. ${title}`;
                       const badge = source.origin
                         ? source.origin.toUpperCase()
                         : null;
@@ -301,11 +302,11 @@ export default function ChatWindow() {
                                 rel="noreferrer"
                                 className="font-medium text-accent underline decoration-accent/50 underline-offset-2 transition hover:text-ember"
                               >
-                                {title}
+                                {numberedTitle}
                               </a>
                             ) : (
                               <span className="font-medium text-ink">
-                                {title}
+                                {numberedTitle}
                               </span>
                             )}
 

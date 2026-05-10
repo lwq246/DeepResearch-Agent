@@ -159,6 +159,14 @@ def relative_month_target(question: str) -> tuple[int, int] | None:
     return None
 
 
+def resolve_requires_web(state: GraphState, question: str) -> bool:
+    return (
+        bool_env("FORCE_WEB_FALLBACK", False)
+        or bool(state.get("requires_web", False))
+        or (relative_month_target(question) is not None)
+    )
+
+
 def temporal_window_label(year: int, month: int) -> str:
     month_name = date(year, month, 1).strftime("%B")
     return f"{month_name} {year}"
@@ -400,21 +408,19 @@ def react_plan(state: GraphState) -> dict[str, Any]:
     documents = state.get("documents", [])
     step = int(state.get("react_step", 0)) + 1
     max_steps = int_env("REACT_MAX_STEPS", 4)
+    web_attempts = int(state.get("web_attempts", 0))
+    max_web_attempts = int_env("MAX_WEB_ATTEMPTS", 2)
 
     has_local_docs = any(str(doc.get("origin", "")) == "qdrant" for doc in documents)
     has_web_docs = any(str(doc.get("origin", "")) == "web" for doc in documents)
     force_web_fallback = bool_env("FORCE_WEB_FALLBACK", False)
-    requires_web = (
-        bool(state.get("requires_web", False))
-        or force_web_fallback
-        or (relative_month_target(question) is not None)
-    )
+    requires_web = resolve_requires_web(state, question)
 
-    if step >= max_steps:
+    if step >= max_steps or web_attempts >= max_web_attempts:
         action = "build_context"
-        thought = "Reached max ReAct steps; building context from current observations."
+        thought = "Safety limit reached; proceeding with available evidence."
     elif state.get("fallback", False):
-        if int(state.get("web_attempts", 0)) < int_env("MAX_WEB_ATTEMPTS", 2):
+        if web_attempts < max_web_attempts:
             action = "web_search"
             thought = "Evidence quality is insufficient; run another web retrieval step."
         else:
@@ -439,8 +445,8 @@ def react_plan(state: GraphState) -> dict[str, Any]:
         fallback_action=action,
         fallback_thought=thought,
         fallback_requires_web=requires_web,
-        web_attempts=int(state.get("web_attempts", 0)),
-        max_web_attempts=int_env("MAX_WEB_ATTEMPTS", 2),
+        web_attempts=web_attempts,
+        max_web_attempts=max_web_attempts,
     )
 
     trace = state.get("react_trace", [])
@@ -512,7 +518,6 @@ def retrieve(state: GraphState) -> dict[str, Any]:
                 "paper_id": str(metadata.get("paper_id", "")),
                 "section": str(metadata.get("section", "")),
                 "published": str(metadata.get("published", "")),
-                "updated": str(metadata.get("updated", "")),
                 "score": float(score),
                 "origin": "qdrant",
             }
@@ -561,7 +566,11 @@ def web_search(state: GraphState) -> dict[str, Any]:
             }
         )
 
-    scored_web_documents = score_web_documents(question, web_documents)
+    scored_web_documents = [
+        doc
+        for doc in score_web_documents(question, web_documents)
+        if safe_float(doc.get("score", 0.0)) >= web_relevance_threshold
+    ]
     top_web_score = max((safe_float(doc.get("score", 0.0)) for doc in scored_web_documents), default=0.0)
 
     return {
@@ -584,11 +593,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
     temporal_target = relative_month_target(question)
-    requires_web = (
-        bool_env("FORCE_WEB_FALLBACK", False)
-        or bool(state.get("requires_web", False))
-        or (temporal_target is not None)
-    )
+    requires_web = resolve_requires_web(state, question)
 
     min_local_docs = int_env("MIN_LOCAL_DOCS", 2)
     min_web_docs = int_env("MIN_WEB_DOCS", 2)
@@ -642,6 +647,14 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
         default_needs_more_web=needs_more_web,
     )
 
+    # Enforce another retrieval cycle while retries remain if evidence is still insufficient.
+    if (not evidence_ok) and (web_attempts < max_web_attempts):
+        needs_more_web = True
+        if reflection_reason:
+            reflection_reason = f"{reflection_reason} | forced_retry_on_insufficient_evidence=true"
+        else:
+            reflection_reason = "Forced retry because evidence_ok=false and retries remain."
+
     return {
         "fallback": needs_more_web,
         "evidence_ok": evidence_ok,
@@ -664,8 +677,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
 def route_after_validation(state: GraphState) -> Literal["react_plan", "build_context"]:
     if state.get("fallback", False):
         return "react_plan"
-    if state.get("evidence_ok", False):
-        return "build_context"
+    # No additional retries requested (or retries exhausted); continue with best available evidence.
     return "build_context"
 
 
@@ -679,11 +691,7 @@ def build_context(state: GraphState) -> dict[str, Any]:
         }
 
     max_final_context_docs = int_env("MAX_FINAL_CONTEXT_DOCS", 8)
-    requires_web = (
-        bool_env("FORCE_WEB_FALLBACK", False)
-        or bool(state.get("requires_web", False))
-        or (relative_month_target(state.get("question", "")) is not None)
-    )
+    requires_web = resolve_requires_web(state, str(state.get("question", "")))
     prefer_web_first = requires_web
 
     seen_keys: set[str] = set()
@@ -736,11 +744,7 @@ def generate(state: GraphState) -> dict[str, Any]:
     prompt_documents = documents[:max_prompt_docs]
 
     temporal_target = relative_month_target(question)
-    requires_web = (
-        bool_env("FORCE_WEB_FALLBACK", False)
-        or bool(state.get("requires_web", False))
-        or (temporal_target is not None)
-    )
+    requires_web = resolve_requires_web(state, question)
     if requires_web:
         web_documents = [
             doc for doc in prompt_documents if str(doc.get("origin", "")) == "web"

@@ -1,0 +1,458 @@
+# **A Flow Matching Algorithm for Many-Shot Adaptation to Unseen Distributions** 
+
+**Tyler Ingebrand** _[∗]_ **Ruihan Zhao** _[∗]_ **Kushagra Gupta** University of Texas at Austin University of Texas at Austin University of Texas at Austin `tyleringebrand@utexas.edu ruihan.zhao@utexas.edu kushagrag@utexas.edu` 
+
+**David Fridovich-Keil Sandeep P. Chinchali** University of Texas at Austin University of Texas at Austin `dfk@utexas.edu sandeepc@utexas.edu` 
+
+**Ufuk Topcu** University of Texas at Austin `utopcu@utexas.edu` 
+
+## **Abstract** 
+
+While generative modeling has achieved remarkable success on tasks like natural language-conditioned image generation, enabling model adaptation from example data points remains a relatively underexplored and challenging problem. To this end, we propose Function Projection for Flow Matching (FP-FM), an algorithm that directly conditions generation on samples from the target distribution. FPFM learns basis functions to span the velocity fields corresponding to a set of training distributions, and adapts to new distributions by computing a simple leastsquares projection onto this basis. This enables efficient generation of samples from diverse target distributions without additional training at inference time. We further introduce multiple variants of FP-FM that provide a trade-off in expressivity and compute by enriching the coefficient calculation, e.g., by making the coefficients dependent on time. FP-FM achieves greatly improved precision and recall relative to baselines across synthetic and image-based datasets, with especially strong gains on unseen distributions. 
+
+## **1 Introduction** 
+
+Generative modeling techniques such as diffusion and flow matching have successfully demonstrated the ability to create high-fidelity, synthetic data modeled after a target distribution [1, 2, 3]. Generative modeling is useful both in domains where the generated object is the end goal, such as image editing or video generation, as well as in domains where the generated object is used for downstream tasks, i.e., acting as a world model for a reinforcement learning agent [4, 5]. For many of these domains, the target distribution changes depending on the end user’s needs, and there may only be limited observed samples from this target distribution. Furthermore, it is often useful if the synthetic samples are generated with minimal latency. In other words, we want a model capable of efficiently generating _many_ distributions based on user specifications. 
+
+The most common approach for conditional generation is to simply include a conditioning variable as an additional input to the model. Most often, this conditioning variable takes the form of natural language (e.g., “an image of a cat”) [6, 7], but it may take on other forms such as a one-hot encoding of a class [8]. However, conditioning variables are not always the best approach. For example, suppose we want to generate images of a specific person. A natural language description of that person’s appearance is likely ineffective, while providing real pictures of this person as examples is more intuitive. Thus, conditioning variables are not sufficient for all tasks and we must consider algorithms which take samples from the target distribution as input. 
+
+> _∗_ Equal contribution 
+
+Preprint. 
+
+**==> picture [396 x 126] intentionally omitted <==**
+
+**----- Start of picture text -----**<br>
+𝒩 𝑣 [𝜄] 𝑝𝑋𝜄<br>𝑔 [1] 𝑥, 𝑡  𝑔 [2] (𝑥, 𝑡)<br>𝜅<br>𝑣 [𝜅] 𝑝𝑋<br>𝑥0𝜅<br>𝑥𝑡𝜅 𝑥1𝜅<br>𝑋0𝜅 ~𝒩 𝑣 [𝜅] 𝑥, 𝑡 ≈ 𝑐 [𝜅,1] 𝑔 [1] 𝑥, 𝑡 + 𝑐 [𝜅,2] 𝑔 [2] 𝑥, 𝑡 Static<br>𝑋1𝜅 ~ 𝑝𝑋𝜅 𝑣 [𝜅] 𝑥, 𝑡 ≈ 𝑐 [𝜅,1] 𝑡𝑔 [1] 𝑥, 𝑡 + 𝑐 [𝜅,2] (𝑡)𝑔 [2] 𝑥, 𝑡 Temporal<br>𝑣 [𝜅] 𝑥, 𝑡 = 𝔼[𝑋1𝜅 −𝑋0𝜅|𝑋𝑡𝜅 = 𝑥]  𝑣 [𝜅] 𝑥, 𝑡 ≈ 𝑐 [𝜅,1] (𝑥, 𝑡)𝑔 [1] 𝑥, 𝑡 + 𝑐 [𝜅,2] (𝑥, 𝑡)𝑔 [2] 𝑥, 𝑡 Dynamic<br>**----- End of picture text -----**<br>
+
+
+Figure 1: **Conceptual diagram.** ( _Left_ ) Illustration of two distributions, _p[ι] X_[and] _[ p][κ] X_[, together with] their associated velocity fields _v[ι]_ and _v[κ]_ . Probability densities are depicted as shaded regions, while velocity fields are indicated by arrows. Both stochastic processes share a common initial distribution, a Normal distribution shown in black. ( _Right_ ) FP-FM learns a set of basis functions that span the space of velocity fields, allowing a target field _v[κ]_ to be represented as a linear combination of these bases. The three FP-FM variants, static, temporal, and dynamic, differ in whether the coefficients are fixed, time-dependent, or state and time-dependent, respectively. 
+
+We introduce Function Projection for Flow Matching (FP-FM), an algorithm for conditional generation where the model is explicitly conditioned on samples from a target distribution (See Figure 1). FP-FM first learns the _k_ most important basis functions in the function space of velocity fields induced by a set of training distributions under flow matching dynamics. By linearly combining these basis functions depending on the provided data, FP-FM is able to approximate the velocity field of a new distribution via a series of simple least-squares calculations. Furthermore, a natural concern for generative modeling is the fidelity-overfitting tradeoff, where highly expressive models may only reproduce the provided samples, and insufficiently expressive models generate infeasible samples. To this end, we present three FP-FM variants spanning this spectrum, allowing practitioners to choose the desired level of model expressivity based on their priorities. 
+
+FP-FM is distinguished from prior work based on a few key characteristics. Unlike conditional models, FP-FM does not require a variable describing the target distributions; it only requires samples. On the other hand, FP-FM may match unseen target distributions without any additional training. Thus, it is computationally more efficient than finetuning, which requires expensive gradient steps to model a new distribution. 
+
+We compare FP-FM against numerous baselines, including unconditional and conditional flow matching, classifier- and distribution-guided methods, and standard finetuning. Across a range of datasets and evaluation settings, we find that FP-FM achieves strong performance on both seen and unseen distributions. In particular, FP-FM consistently improves precision on out-of-distribution targets while maintaining competitive recall, highlighting its ability to capture the desired distribution without over-approximating the data manifold. Moreover, the different variants of FP-FM expose a clear tradeoff between expressivity and computational cost, allowing practitioners to select the most appropriate model for their setting. These results demonstrate that explicitly conditioning on samples using a function space perspective is a practical and effective alternative to existing approaches. 
+
+## **2 Background** 
+
+We first clarify notation. We use _ι ∈I_ to index over an arbitrary set and _i_ to index over a discrete set. Superscripts denote indices, e.g., _c[ι]_ or _c[i]_ . When multiple indices are required, we write _c[ι,i]_ . Subscripts denote time, such as a stochastic process _Xt_ , or distributions, such as _pX_ . 
+
+## **2.1 Flow Matching** 
+
+We build upon the flow matching framework [2]. Consider a data space _X ⊂_ R _[n]_ and a probability densityobjective is to learn a generative model that produces samples _pX_ : _X →_ R _>_ 0 with � _X[p][X]_[(] _[x]_[)] _[dx]_[=][1][.][We are given] _[ m] x_ ˆ whose distribution approximately[ samples] _[ x]_[1] _[, . . . , x][m]_[i.i.d.] _∼ pX_ . The 
+
+2 
+
+matches _pX_ . Flow matching defines a stochastic process, _Xt_ for _t ∈_ [0 _,_ 1], such that simulating this stochastic process approximately yields samples from _pX_ . To do so, choose a noise distribution that is easy to sample from, typically the standard normal distribution. Then define _X_ 0 _∼N_ (0 _, I_ ), _X_ 1 _∼ pX_ , and _Xt_ := (1 _− t_ ) _X_ 0 + _tX_ 1. To approximate this process, train a model _v_ to fit the expected velocity field, _v_ ( _x, t_ ) = E[ _X_ 1 _− X_ 0 _|Xt_ = _x_ ], and define the approximated stochastic _′ ′ ′ t ′ ′ d_ process as _X_ 0 _[∼N]_[(0] _[, I]_[)] _[, X] t_[:=] _[ X]_ 0[+] �0 _[v]_[(] _[X] τ[, τ]_[)] _[dτ]_[.][Then] _[ X] t_ = _Xt_ and it is feasible to simulate _Xt′_[, which generates samples from] _[ p][X]_[.] 
+
+## **2.2 Function Encoders** 
+
+In this section, we introduce the function encoder (FE) algorithm [9]. Consider a Hilbert space _H_ = _{f_ : _X →_ R _[n] }_ with an inner product _⟨·, ·⟩H_ . As an example, an inner product under an input data distribution _px_ is _⟨f, g⟩pX_ := _n_[1][E] _[X]_[[] _[f]_[(] _[X]_[)] _[⊤][g]_[(] _[X]_[)]][.][In particular, this inner product has] connections to mean squared error: 
+
+**==> picture [292 x 28] intentionally omitted <==**
+
+Thus, mean squared error is equivalent to squared distance in this function space. 
+
+The function encoder [9] is an algorithm to learn a set of basis functions _{g[i]_ : _X →_ R _[n] }[k] i_ =1 parametrized as neural networks to span a function space, where any function _f ∈H_ is represented as a linear combination of the basis, _f_ =[�] _[k] i_ =1 _[c][i][g][i]_[.][Computing the scalar coefficients] _[ c][ ∈]_[R] _[k]_[requires] a dataset of input-output pairs, _{_ ( _x[j] , y[j]_ ) _}[m] j_ =1[.][These input-output pairs are used to approximate the] inner product, and the coefficients are calculated as the solution to a least-squares problem: 
+
+**==> picture [303 x 45] intentionally omitted <==**
+
+Function encoders are useful because they allow for efficient adaptation to new functions while remaining highly expressive. For more information on this algorithm, see [9]. 
+
+## **3 Methods** 
+
+## **3.1 Problem Setting** 
+
+In this section, we extend the flow matching formulation to a _collection_ of distributions. Rather than a single target distribution, we are given a finite family of training distributions, each observed through samples. Our goal is to learn a model that can generate samples from any of these distributions. Moreover, the goal is adaptation: after training, given samples from a previously unseen distribution, the model should efficiently adjust and generate samples from this new distribution. 
+
+To formalize this setting, let _{p[ι] X[}][ι][∈I]_[be a set of target data distributions.][Assume we only observe a] finite subset of the distributions in _I_ during training. That is, there exists a training subset _T ⊂I_ . We denote a dataset of independent samples from _p[ι] X_[by] _[ D][ι]_[:=] _[ {][x][ι,i][}][m] i_ =1[, and assume such a dataset] is available for each _ι ∈T_ ; i.e., we have access to _{D[ι] }ι∈T_ . The goal is to train a model that can generate samples from each training distribution _p[ι] X_[.][After training, our model should generalize to a] new distribution _p[ι] X_[,] _[ ι][ ∈I \ T]_[ , given an unseen set of samples] _[ x][ι,]_[1] _[, ..., x][ι,m][i.i.d.] ∼ p[ι] X_[.][This implies] our learned model conditions its output distribution on the samples _x[ι,]_[1] _, ..., x[ι,m]_ . As an example, the most obvious solution to this problem is to finetune a model based on this new dataset. 
+
+## **3.2 Approach** 
+
+We begin by highlighting three observations that suggest a function encoder-style algorithm is well-suited to this problem. Firstly, for each _p[ι] X_[,][we][may][define][a][stochastic][process] _[X] t[ι]_[and] its corresponding velocity field _v[ι]_ as in Section 2.1. Thus, we may view this problem as fitting velocity fields in the set _V_ = _{v[ι]_ : _X ×_ [0 _,_ 1] _→_ R _[n] |ι ∈I}_ . Secondly, a crucial detail in the 
+
+3 
+
+flow matching framework is that the loss function must be mean squared error in order to learn E[ _X_ 1 _− X_ 0 _|Xt_ = _x_ ]. Mean squared error, in turn, can be viewed as the (squared) norm induced by the distribution-weighted inner product, as highlighted in section 2.2. Thus, it is natural to equip _V_ with the distribution-weighted inner product as this maintains the geometry present in the flow matching framework. Thirdly, access to the dataset _D[ι]_ allows us to approximate inner products involving the unobserved _v[ι]_ and a known function _g_ : 
+
+**==> picture [323 x 37] intentionally omitted <==**
+
+**==> picture [275 x 13] intentionally omitted <==**
+
+Equation (5) allows us to avoid sampling _Xt[ι]_[directly and does not require access to] _[ v][ι]_[.][Therefore, we] may approximate inner products involving _v[ι]_ under the current data assumptions. With these three observations taken together, it is clear this setting fits neatly into the function encoder framework. In the following sections, we will introduce three variations of our method building upon these ideas. 
+
+## **3.2.1 Static FP-FM** 
+
+As suggested by the previous section, the most obvious approach is to directly apply the function encoder algorithm to this setting. That is, we approximate the velocity field _v[ι]_ as 
+
+**==> picture [252 x 31] intentionally omitted <==**
+
+where _{g[i] }[k] i_ =1[are neural networks and] _[ c][ι][∈]_[R] _[k]_[.][As the notation implies, for each velocity field] _[ v][ι]_[,] there is a corresponding vector _c[ι]_ . We may calculate the coefficients using least squares as above: 
+
+**==> picture [324 x 48] intentionally omitted <==**
+
+The key detail is that the distribution used to compute the inner product is _pt,Xt[ι]_[, the distribution of] _Xt_ ’s corresponding to a specific target distribution _p[ι] X_[.][Interestingly, this implies there is a separate] inner product for each target distribution. This poses interesting questions from a mathematical perspective, which we discuss in Appendix B. For the purposes of flow matching, the key detail is that we want one set of basis functions to span all of the target velocity fields, but we use a distribution-specific inner product to find the best approximation for a given velocity field within this basis. To train the basis functions, we leverage the function encoder algorithm [9], though care must be taken to ensure the correct inner product is used to compute each _c[ι]_ . See Appendix D. For reasons that will later become obvious, we call this version of our approach `Static FP-FM` . So long as we use a sufficient number of sufficiently expressive basis functions (see [9]), we may reasonably approximate the velocity fields of the training functions, _{v[ι] |ι ∈T }_ . Thus, the constant function encoder may generate new samples that are distributed approximately the same as any distribution _p[ι] X_[in][its][training][set.][However,][for] _[p][ι] X[, ι][∈I][\ T]_[ ,][problems][arise.][Using][Equation] (7) yields the best approximation of any new velocity field _vι_ within the linear span of the basis. However, the continuity equation is nonlinear, meaning that the relationship between a distribution _p[ι] X_[and its velocity field] _[ v][ι]_[ is nonlinear.][Therefore, even if the basis spans the velocity fields in the] training set, an “easy” distribution such as a mixture is not necessarily within the span of the basis. In the following sections, we will introduce modifications to this approach that address this issue. 
+
+## **3.2.2 Temporal FP-FM** 
+
+To make FP-FM transfer to new distributions, we must correct the nonlinearity issue. The approximation of a given velocity field depends on two parts: The basis functions and the coefficients. The basis functions themselves are already highly expressive as they are neural networks, so instead we modify the coefficient calculation. A straightforward way of doing so is to make the coefficients dependent on time. Let us first introduce a variation of the notation. For a given time _t_ , and any 
+
+4 
+
+function _h_ : _X ×_ [0 _,_ 1] _→_ R _[n]_ , let the function at a fixed time _t_ be denoted as _ht_ ( _·_ ) := _h_ ( _·, t_ ). Then we can modify the equations above: 
+
+**==> picture [250 x 30] intentionally omitted <==**
+
+To calculate the coefficients, we must also change the inner product: 
+
+**==> picture [330 x 49] intentionally omitted <==**
+
+Note that the distribution for the inner product is _pXt[ι][|][t]_[; that is, it depends on the distribution of states] at that specific time _t_ . While this change appears small in notation, its impact is profound. We offer three separate ways to understand the significance, starting with the concrete and moving towards the abstract. Firstly, during generation, we must calculate the coefficients at every time _t_ , rather than only once. Secondly, we can now view the coefficients as a function _c[ι]_ : [0 _,_ 1] _→_ R _[k]_ , meaning that the coefficients are now a function of time. Thirdly, we can view this as modifying the function space definition. Where before we were training basis functions to span _{v[ι]_ : _X ×_ [0 _,_ 1] _→_ R _[n] |ι ∈I}_ , we are now training basis functions to span _{vt[ι]_[:] _[X][→]_[R] _[n][|][ι][∈I][, t][∈]_[[0] _[,]_[ 1]] _[}]_[.][Where before we had] _[ k]_ basis functions _{g[i] }[k] i_ =1[, we now have] _[ k]_[ basis functions at every time] _[ t]_[, i.e.,] _[ {][g] t[i][}][k] i_ =1[.] 
+
+## **3.2.3 Dynamic FP-FM** 
+
+In this section, we take this idea to its natural conclusion. If we can make the model more expressive by making its coefficients depend on time, then we can further increase the expressivity by making the coefficients depend on the state: 
+
+**==> picture [263 x 30] intentionally omitted <==**
+
+To compute the localized coefficients _c[ι]_ ( _x, t_ ), we evaluate the inner product defined previously, but condition it on the observed state _Xt_ = _x_ and time _t_ . Denoting this conditional inner product as _⟨·, ·⟩x,t_ , the coefficients are computed as the solution to the localized least-squares problem: 
+
+**==> picture [321 x 45] intentionally omitted <==**
+
+Because _x_ and _t_ are fixed, the conditional expectation collapses. Thus, we can directly compute the left-hand side as _⟨g[i] , g[j] ⟩x,t_ = _n_[1] _[g][i]_[(] _[x, t]_[)] _[⊤][g][j]_[(] _[x, t]_[)][.][However, we still do not have direct access] to the true velocity field _v[ι]_ , meaning we must still use Equation (4). By exploiting the conditional distribution, the right-hand side simplifies to _⟨v[ι] , g[i] ⟩x,t_ = _n_[1][E] _[X]_[1] _[,X]_[0] _[|][X][t]_ � _X_ 1 _[ι][−][X]_ 0 _[ι][|][ X] t[ι]_[=] _[ x]_ � _⊤gi_ ( _x, t_ ), which we again approximate from empirical data. Putting these two facts together, solving Equation (11) effectively performs two steps: 1) computing an empirical estimate of the mean velocity field given _Xt[ι]_[=] _[ x]_[, and 2) finding the best approximation of this vector within the] _[ k]_[-dimensional subspace] of R _[n]_ spanned by the basis _{g[i]_ ( _x, t_ ) _}[k] i_ =1[.][We can interpret this as similar to a purely data-driven] approach, except the learned functions _{g[i] }_ play the crucial role of regularizing the approximation based on the data present in the training set. 
+
+Another important consideration is approximating the conditional expectation E[ _X_ 1 _[ι][−][X]_ 0 _[ι][|][ X] t[ι]_[=] _[ x]_[]][.] Because this expectation is conditioned on the fixed state, we can no longer estimate it by drawing independent samples of _X_ 0 _[ι]_[and] _[ X]_ 1 _[ι]_[; any valid pair must strictly satisfy the deterministic constraint] _Xt[ι]_[= (1] _[ −][t]_[)] _[X]_ 0 _[ι]_[+] _[ tX]_ 1 _[ι]_[.][Instead, we bypass this issue using the following general result:] 
+
+**Theorem 1.** _Given the fixed noisy example Xt_ = _x and a random variable X_ 1 _, let X_ 0 _[∗]_[=] _[x][−]_ 1 _−[tX] t_[1] _[.] The conditional expectation can be expressed as an expectation over the marginal distribution of X_ 1 _:_ 
+
+**==> picture [238 x 26] intentionally omitted <==**
+
+5 
+
+This formulation is highly amenable to Monte Carlo approximation. We already possess samples from the target distribution _p_ ( _X_ 1), and computing _X_ 0 _[∗]_[is a trivial linear operation given] _[ x]_[ and] _[ X]_[1][.] Furthermore, assuming the base noise distribution is Gaussian, _p_ ( _X_ 0 _[∗]_[)][ can be evaluated analytically.] Together, these properties yield an efficient, self-normalized importance sampling estimator for the conditional expectation. A full derivation of the theorem and algorithmic details regarding the sampling procedure are deferred to Appendix A. 
+
+## **3.2.4 Tradeoffs** 
+
+Next, we will discuss the tradeoffs between these three approaches. As suggested in the preceding sections, we observe an ordering in expressive power: `Dynamic FP-FM` exhibits the greatest expressivity, followed by the `Temporal FP-FM` , and finally `Static FP-FM` . On the other hand, we observe the opposite relationship in terms of compute. `Static FP-FM` is the most compute efficient, as it computes the coefficients only once per distribution. `Temporal FP-FM` is the next most efficient, as it computes coefficients once per timestep of the integrator. Lastly, `Dynamic FP-FM` computes the coefficients once per timestep per sample. In the following sections, we will empirically compare the three approaches to validate these tradeoffs. 
+
+**==> picture [315 x 221] intentionally omitted <==**
+
+**----- Start of picture text -----**<br>
+Dataset Uncond. Cond. Cls. Dist. Fine Static Tem- Dynamic<br>Guided Guided tune poral<br>TD<br>UD<br>US<br>TD<br>UD<br>US<br>2D Arcs<br>MNIST<br>**----- End of picture text -----**<br>
+
+
+Figure 2: Qualitative comparison across datasets and distribution types. For 2D Arcs, the image shows the full distributions, where red points correspond to samples from the target distribution and blue points are samples from the model. For MNIST, each image shows one sample from the model. 
+
+## **4 Experiments** 
+
+We empirically validate our approach on three datasets: _2D Arcs_ , _MNIST_ [10], and _ImageNet_ [11]. 2D Arcs is a low-dimensional dataset that enables visualization of the learned distributions. MNIST evaluates performance on structured image data, while ImageNet tests scalability to large-scale, high-dimensional data. To measure the generalization capabilities of these approaches, we evaluate on three different distribution splits for each dataset. _Training Distribution (TD)_ is a distribution that was seen during training. _Unseen Distribution (UD)_ is a distribution that is not in the training set, but the individual samples have been seen before. For example, if we train on MNIST on digits 0 through 8, an unseen distribution could be a mixture of 0 and 1. Lastly, _Unseen Support (US)_ is an unseen distribution with a different support than what was seen during training. To continue the analogy, if we train on MNIST 0 through 8, then the distribution corresponding to 9 has an unseen support. 
+
+We compare against 5 baselines. `Unconditional` is a standard flow matching model [2] trained on all of the training distributions as if they were a single distribution. This acts as naive baseline, 
+
+6 
+
+|Algorithm|Precision <br>TD<br>UD|Precision <br>TD<br>UD|_↑_<br>US|TD|Recall_↑_<br>UD|US|Time|Table 1:<br>**2D Arc.**<br>Comparison of meth-|
+|---|---|---|---|---|---|---|---|---|
+|`Unconditional`|0.075|0.194|0.001|0.978|0.979|0.029|0.07|ods across TD, UD, and|
+|`Conditional`|0.257|0.387|0.003|0.985|0.662|0.035|0.07|US settings. Arrows in-|
+|`Classifier-Guided`|0.272|0.465|0.004|0.810|0.824|0.097|7.20|dicate whether higher|
+|`Distribution-Guided`|0.227|0.250|0.178|0.990|0.989|0.989|14.48|(_↑_) or lower (_↓_) is bet-|
+|`Finetune`|0.213|0.255|0.176|0.987|0.988|0.987|4.93|ter. Results are meaned|
+|`Static FP-FM`|0.221|0.305|0.058|0.832|0.799|0.921|0.09|over 5 seeds. Standard|
+|`Temporal FP-FM`|0.506|0.690|0.488|0.980|0.979|0.988|0.98|deviation is left to the|
+|`Dynamic FP-FM`|**0.931**|**0.976**|**0.734**|**0.965**|**0.962**|**0.890**|11.24|appendix for brevity.|
+
+
+
+|Algorithm|Precision_↑_<br>TD<br>UD<br>US|Recall_↑_<br>TD<br>UD<br>US|FID_↓_<br>TD<br>UD<br>US|Time|
+|---|---|---|---|---|
+||||||
+|`Unconditional`<br>`Conditional`<br>`Classifier-Guided`<br>`Distribution-Guided`<br>`Finetune`<br>`Static FP-FM`<br>`Temporal FP-FM`<br>`Dynamic FP-FM`|0.296<br>0.442<br>0.306<br>0.878<br>0.762<br>0.343<br>0.562<br>0.641<br>0.403<br>0.374<br>0.371<br>0.160<br>0.376<br>0.408<br>0.340<br>0.798<br>0.765<br>0.571<br>0.787<br>0.778<br>0.589<br>**0.935**<br>**0.938**<br>**0.903**|0.698<br>0.698<br>0.694<br>0.867<br>0.777<br>0.783<br>0.732<br>0.728<br>0.686<br>0.408<br>0.445<br>0.229<br>0.377<br>0.383<br>0.557<br>0.877<br>0.851<br>0.869<br>0.885<br>0.894<br>0.889<br>**0.925**<br>**0.929**<br>**0.937**|100.30<br>93.13<br>98.79<br>13.22<br>22.14<br>31.56<br>83.61<br>84.30<br>91.66<br>67.62<br>53.04<br>192.79<br>40.83<br>40.95<br>29.24<br>15.72<br>24.07<br>18.81<br>14.13<br>17.64<br>17.21<br>**10.44**<br>**10.64**<br>**11.25**|9.93<br>10.32<br>28.16<br>604.84<br>209.35<br>10.50<br>20.61<br>21.71|
+
+
+
+Table 2: **MNIST.** Comparison of methods across TD, UD, and US settings. Arrows indicate whether higher ( _↑_ ) or lower ( _↓_ ) is better. Results are meaned over 5 seeds. Standard deviation is left to the appendix for brevity. 
+
+and as a starting point for some of the other algorithms. `Conditional` is a model provided with a conditioning variable to describe the target distribution, e.g., a one-hot encoding of the class [8]. `Classifier-Guided` trains a classifier for a given target distribution, then uses the score to guide generation of a pretrained, unconditional model [12]. `Distribution-Guided` likewise starts with a pretrained, unconditional model. It then trains a secondary model to produce noise inputs that, when passed through the pretrained model, generate samples from the target distribution. See Appendix C for a visualization. Lastly, `Finetune` is the standard approach. Given a pretrained unconditional model, finetune it on the data provided for the target distribution. Note that there are many tradeoffs you can make during finetuning; e.g., LoRA [13] is more compute efficient but less expressive. For more detailed descriptions of the baselines, see Appendix C. 
+
+To evaluate these approaches, we use various metrics: _Generation Time_ measures how long it takes to generate a batch of samples. _Precision_ measures how well the generated samples match the target distribution; _Recall_ measures how well real samples match the generated distribution [14]. For the image-based datasets, we also use _FID_ [15]. For implementation details, see Appendix C. Qualitative results are shown in Figure 2, and quantitative results are reported in Tables 1, 2, and 3. 
+
+## **4.1 Results** 
+
+**2D Arcs.** The TDs consist of uniform distributions over arcs spanning one quarter of the unit circle, parameterized by their central angle. UDs are formed by mixtures of two training distributions. US corresponds to a spiral distribution from the origin to the unit circle. See Figure 2 for a visualization. Qualitatively, `Static FP-FM` accurately captures the TDs but fails to generalize to either UD or US. In contrast, `Temporal FP-FM` produces reasonable approximations across all three settings, including previously unseen mixtures and supports. `Dynamic FP-FM` further improves upon this, yielding the most accurate reconstructions of the target distributions across TD, UD, and US. Among the baselines, `Unconditional` model produces a uniform distribution over the entire unit circle, failing to capture any specific target distribution. `Conditional` model successfully represents TDs using the angle as a conditioning variable, but this representation does not extend to mixtures or novel supports, leading to poor performance on UD and US. `Classifier-Guided` methods capture both TD and UD by steering the unconditional model, but fail to generalize to US. In contrast, 
+
+7 
+
+|Algorithm|Precision_↑_<br>TD<br>US|Recall_↑_<br>TD<br>US|FID_↓_<br>TD<br>US|
+|---|---|---|---|
+|||||
+|`Conditional`<br>`Finetune`(LoRA)<br>`Static FP-FM`<br>`Temporal FP-FM`<br>`Dynamic FP-FM`|0.509<br>0.012<br>0.489<br>0.344<br>0.025<br>0.017<br>0.015<br>0.013<br>**0.669**<br>**0.699**|0.225<br>0.394<br>0.143<br>0.251<br>0.377<br>0.361<br>0.128<br>0.153<br>**0.667**<br>**0.682**|156.3<br>378.7<br>162.6<br>193.8<br>341.1<br>331.4<br>366.7<br>360.3<br>**126.1**<br>**117.0**|
+
+
+
+Table 3: **Imagenet.** Comparison of methods across TD and US settings. Arrows indicate whether higher ( _↑_ ) or lower ( _↓_ ) is better. 
+
+`Distribution-Guided` and `Finetune` are able to approximate TD, UD, and US, though with noticeable error. The quantitative results are consistent with these observations. Many methods achieve high recall, indicating a tendency to overestimate the support of the data distribution. In contrast, `Dynamic FP-FM` achieves the highest precision, particularly on UD and US, indicating more accurate modeling of the target distributions. `Temporal FP-FM` achieves the next best precision, while other methods exhibit a trade-off of high recall but low precision. 
+
+**MNIST.** The TDs consist of digit classes 0 through 8. UDs are defined as mixtures of any two of these classes, while US corresponds to the unseen class 9. Qualitatively, the trends observed in 2D Arcs carry over to MNIST. `Static FP-FM` successfully models TDs but fails to generalize to UD and US. `Temporal FP-FM` improves generalization to mixtures and unseen classes, producing reasonable samples across all settings. `Dynamic FP-FM` again provides the most consistent performance, accurately capturing TD, UD, and US. These trends are reflected in the quantitative metrics. `Dynamic FP-FM` achieves the best overall performance, with the highest precision, recall, and FID scores across all splits, followed by `Temporal FP-FM` . Other methods tend to achieve reasonable recall but significantly lower precision and worse FID scores. We also use MNIST to perform ablations on the number of shots and the number of basis functions. See Appendix F. 
+
+**ImageNet.** Similar to MNIST, we use a random subset with 900 classes out of 1000 to form the TDs, and the rest are used for US. We use a latent Vision Transformer (ViT) [16, 17] backbone and each baseline is trained for 150,000 training steps. Due to the expense of training, we only train one model and focus on key baselines. See Figure 3 and Table 3. Qualitatively, `Conditional` , `Finetune` , and `Dynamic FP-FM` successfully capture TDs, albeit with minor artifacts. While `Static FP-FM` and `Temporal FP-FM` also model these distributions, their representations are comparatively limited here, likely because a memory-constrained batch size of 32 is too small to fully capture the class-specific context. On US, `Conditional` unsurprisingly fails. `Finetune` ’s outputs lack key details, although the low frequency features look correct. `Dynamic FP-FM` outputs the best images. These results are confirmed by the quantitative metrics: `Dynamic FP-FM` has the best precision, recall, and FID. 
+
+Overall, the experiments show that `Dynamic FP-FM` achieve the best scores, followed by `Temporal FP-FM` and then `Static FP-FM` . This is in alignment with the ordering of expressivity, as discussed in Section 3.2. Compared to other baselines, FP-FM has lower compute times than any method that requires finetuning, while paying a small cost relative to the conditional approach. Overall, the FP-FM variants achieve competitive or superior performance to prior work, particularly on UDs and USs, while requiring lower compute than training-based approaches. 
+
+**==> picture [359 x 86] intentionally omitted <==**
+
+**----- Start of picture text -----**<br>
+Split Conditional Finetune Static Temporal Dynamic<br>Catamaran Chow Egypt. Cat Swimtrunks Lacewing King Crab<br>TD<br>Koala Planetarium Chow Box Turtle<br>US<br>Microphone Flute Pier Scuba Diver Envelope Camera Pier Ice Bear Macaque Scuba Diver<br>**----- End of picture text -----**<br>
+
+
+Figure 3: Qualitative comparison on ImageNet. Two samples are shown for each baseline and split. 
+
+8 
+
+## **5 Discussion** 
+
+One crucial consideration is the desired expressivity of the model. To that end, an interesting direction is to generalize our method to a spectrum of methods with controllable expressivity. For example, if the coefficients are thought of as a function of state and time, then imposing different characteristics such as Lipschitz constraints control the expressivity of the model. In this sense, `Static FP-FM` ’s coefficients are 0-Lipschitz with respect to state and time, while `Dynamic FP-FM` ’s coefficients have no Lipschitz constraints. `Temporal FP-FM` is 0-Lipschitz with respect to state but not time. Generalizing this method to a spectrum is an interesting direction, and we leave it to future work. 
+
+**Limitations.** While FP-FM is significantly more computationally efficient than finetuning, it is slightly more expensive than a `Conditional` model, as shown in the experiments. This tradeoff is empirically justified by improvements in UD and US performance. FP-FM also requires samples, rather than a conditioning variable. This assumption may or may not be reasonable, depending on the setting. Finally, performance improves with the number and quality of samples provided. In extremely low-sample regimes, the method may struggle to accurately capture the underlying manifold, and the required number of samples depends on the target distribution. 
+
+**Broader Impact.** FP-FM may lower the barrier to producing highly targeted synthetic data, potentially enabling impersonation, data poisoning, or the amplification of biased or misleading content. If an industry-grade model is made publicly available, standard security safeguards should be implemented to prevent malicious use. 
+
+## **6 Related Work** 
+
+This work is a continuation of parametric generative modeling [1, 18]. In particular, we build upon the ODE viewpoint [2, 19] implied by the continuity equation, which suggests we can transform an arbitrary noise distribution into a target distribution with an appropriate velocity field. From this viewpoint, generative modeling simplifies to defining an appropriate stochastic process and modeling it with a neural ODE [20]. Our problem setting is closely related to conditional generative modeling. For example, class-conditional generative modeling uses a variable to represent the class [21, 8]. Many approaches use natural language as a conditioning variable as it is highly expressive [6, 7, 3, 22]. However, a natural language model requires a significant amount of training data, which may not always be available, and in some cases natural language is not sufficient to describe a distribution (e.g., describing a specific person in text is non-trivial). FP-FM differs from these prior works in that it does not require knowledge of the conditioning variable; It only requires samples. Another series of works focus on updating the parameters of the model to fit a new distribution [23], such as finetuning token representations for transformer-based model [16]. Other approaches train classifiers and use the score to guide generation, or just use Langevin dynamics directly [12, 24]. In contrast to these approaches, we do not require additional training to fit new distributions. 
+
+A related line of work is meta-learning. Our approach is considered a form of meta learning [25], where approximating the velocity field for a given distribution is the inner problem, and training the basis functions is the outer problem. Some approaches leverage learned latent representations to encode target functions along with learned networks to leverage these representations [26, 27], whereas we leverage least squares to compute representations. Other approaches also learn basis functions [28, 29], but these approaches leverage the Woodbury identity, meaning there least squares solve scales poorly with the amount of data. In contrast, we use basis functions in feature space rather than kernel space, and so our method scales well with the amount of data. 
+
+The closest work is FE-based neural ODEs [30], which train neural ODE basis functions to model deterministic dynamical systems. The key difference is that FE neural ODEs model the state of a dynamical system at discrete time points, since the state derivatives are unobserved in their setting, whereas we are fitting the velocity field directly. Thus the training data assumptions and model outputs serve substantially different purposes between these two works. 
+
+9 
+
+## **7 Conclusion** 
+
+We introduced FP-FM, a flow matching algorithm that enables rapid adaptation to unseen target distributions. By reframing velocity field estimation in terms of a distribution-weighted inner product, we showed how Hilbert spaces naturally integrate with the flow matching objective. The three FP-FM variants progressively increase expressivity by varying the coefficient calculation, with more expressive models fitting new distributions more accurately. In our experiments, we observe a consistent improvement in precision, recall, and FID as expressivity increases, with `Dynamic FP-FM` performing best overall, followed by `Temporal FP-FM` and `Static FP-FM` . This opens several directions for future work, such as more fine-grained control of the expressivity. Overall, FP-FM is a natural first step towards adapting generative models to unseen distributions. 
+
+## **References** 
+
+- [1] Jonathan Ho, Ajay Jain, and Pieter Abbeel. Denoising diffusion probabilistic models. In _NeurIPS_ , 2020. 
+
+- [2] Yaron Lipman, Ricky T. Q. Chen, Heli Ben-Hamu, Maximilian Nickel, and Matthew Le. Flow matching for generative modeling. In _ICLR_ . OpenReview.net, 2023. 
+
+- [3] Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Björn Ommer. Highresolution image synthesis with latent diffusion models. In _CVPR_ , pages 10674–10685. IEEE, 2022. 
+
+- [4] Jingtao Ding, Yunke Zhang, Yu Shang, Yuheng Zhang, Zefang Zong, Jie Feng, Yuan Yuan, Hongyuan Su, Nian Li, Nicholas Sukiennik, Fengli Xu, and Yong Li. Understanding world or predicting future? A comprehensive survey of world models. _ACM Comput. Surv._ , 58(3): 57:1–57:38, 2026. 
+
+- [5] Jake Bruce, Michael D. Dennis, Ashley Edwards, Jack Parker-Holder, Yuge Shi, Edward Hughes, Matthew Lai, Aditi Mavalankar, Richie Steigerwald, Chris Apps, Yusuf Aytar, Sarah Bechtle, Feryal M. P. Behbahani, Stephanie C. Y. Chan, Nicolas Heess, Lucy Gonzalez, Simon Osindero, Sherjil Ozair, Scott E. Reed, Jingwei Zhang, Konrad Zolna, Jeff Clune, Nando de Freitas, Satinder Singh, and Tim Rocktäschel. Genie: Generative interactive environments. In _ICML_ , Proceedings of Machine Learning Research, pages 4603–4623. PMLR / OpenReview.net, 2024. 
+
+- [6] Aditya Ramesh, Prafulla Dhariwal, Alex Nichol, Casey Chu, and Mark Chen. Hierarchical text-conditional image generation with CLIP latents. _CoRR_ , abs/2204.06125, 2022. 
+
+- [7] Chitwan Saharia, William Chan, Saurabh Saxena, Lala Li, Jay Whang, Emily L. Denton, Seyed Kamyar Seyed Ghasemipour, Raphael Gontijo Lopes, Burcu Karagol Ayan, Tim Salimans, Jonathan Ho, David J. Fleet, and Mohammad Norouzi. Photorealistic text-to-image diffusion models with deep language understanding. In _NeurIPS_ , 2022. 
+
+- [8] Jonathan Ho and Tim Salimans. Classifier-free diffusion guidance. _CoRR_ , abs/2207.12598, 2022. 
+
+- [9] Tyler Ingebrand, Adam J. Thorpe, and Ufuk Topcu. Function encoders: A principled approach to transfer learning in hilbert spaces. In _ICML_ , Proceedings of Machine Learning Research. PMLR / OpenReview.net, 2025. 
+
+- [10] Yann LeCun, Léon Bottou, Yoshua Bengio, and Patrick Haffner. Gradient-based learning applied to document recognition. _Proc. IEEE_ , 86(11):2278–2324, 1998. 
+
+- [11] Olga Russakovsky, Jia Deng, Hao Su, Jonathan Krause, Sanjeev Satheesh, Sean Ma, Zhiheng Huang, Andrej Karpathy, Aditya Khosla, Michael S. Bernstein, Alexander C. Berg, and Li FeiFei. Imagenet large scale visual recognition challenge. _Int. J. Comput. Vis._ , 115(3):211–252, 2015. 
+
+- [12] Prafulla Dhariwal and Alexander Quinn Nichol. Diffusion models beat gans on image synthesis. In _NeurIPS_ , pages 8780–8794, 2021. 
+
+10 
+
+- [13] Edward J Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. Lora: Low-rank adaptation of large language models. _arXiv preprint arXiv:2106.09685_ , 2021. 
+
+- [14] Tuomas Kynkäänniemi, Tero Karras, Samuli Laine, Jaakko Lehtinen, and Timo Aila. Improved precision and recall metric for assessing generative models. In _NeurIPS_ , pages 3929–3938, 2019. 
+
+- [15] Martin Heusel, Hubert Ramsauer, Thomas Unterthiner, Bernhard Nessler, and Sepp Hochreiter. Gans trained by a two time-scale update rule converge to a local nash equilibrium. In _NIPS_ , pages 6626–6637, 2017. 
+
+- [16] Alexey Dosovitskiy, Lucas Beyer, Alexander Kolesnikov, Dirk Weissenborn, Xiaohua Zhai, Thomas Unterthiner, Mostafa Dehghani, Matthias Minderer, Georg Heigold, Sylvain Gelly, Jakob Uszkoreit, and Neil Houlsby. An image is worth 16x16 words: Transformers for image recognition at scale. In _ICLR_ . OpenReview.net, 2021. 
+
+- [17] William Peebles and Saining Xie. Scalable diffusion models with transformers. _arXiv preprint arXiv:2212.09748_ , 2022. 
+
+- [18] Yang Song, Jascha Sohl-Dickstein, Diederik P. Kingma, Abhishek Kumar, Stefano Ermon, and Ben Poole. Score-based generative modeling through stochastic differential equations. In _ICLR_ . OpenReview.net, 2021. 
+
+- [19] Xingchao Liu, Chengyue Gong, and Qiang Liu. Flow straight and fast: Learning to generate and transfer data with rectified flow. In _ICLR_ . OpenReview.net, 2023. 
+
+- [20] Ricky T. Q. Chen, Yulia Rubanova, Jesse Bettencourt, and David Duvenaud. Neural ordinary differential equations, 2018. 
+
+- [21] Christina Winkler, Daniel E. Worrall, Emiel Hoogeboom, and Max Welling. Learning likelihoods with conditional normalizing flows. _CoRR_ , abs/1912.00042, 2019. 
+
+- [22] Yogesh Balaji, Seungjun Nah, Xun Huang, Arash Vahdat, Jiaming Song, Karsten Kreis, Miika Aittala, Timo Aila, Samuli Laine, Bryan Catanzaro, Tero Karras, and Ming-Yu Liu. ediff-i: Text-to-image diffusion models with an ensemble of expert denoisers. _CoRR_ , abs/2211.01324, 2022. 
+
+- [23] Nataniel Ruiz, Yuanzhen Li, Varun Jampani, Yael Pritch, Michael Rubinstein, and Kfir Aberman. Dreambooth: Fine tuning text-to-image diffusion models for subject-driven generation. In _CVPR_ , pages 22500–22510. IEEE, 2023. 
+
+- [24] Yang Song and Stefano Ermon. Generative modeling by estimating gradients of the data distribution. In _NeurIPS_ , pages 11895–11907, 2019. 
+
+- [25] Chelsea Finn, Pieter Abbeel, and Sergey Levine. Model-agnostic meta-learning for fast adaptation of deep networks. In _ICML_ , Proceedings of Machine Learning Research, pages 1126–1135. PMLR, 2017. 
+
+- [26] Marta Garnelo, Dan Rosenbaum, Christopher Maddison, Tiago Ramalho, David Saxton, Murray Shanahan, Yee Whye Teh, Danilo Jimenez Rezende, and S. M. Ali Eslami. Conditional neural processes. In _ICML_ , Proceedings of Machine Learning Research, pages 1690–1699. PMLR, 2018. 
+
+- [27] Harrison Edwards and Amos J. Storkey. Towards a neural statistician. In _ICLR_ , 2017. 
+
+- [28] Andrew Gordon Wilson, Zhiting Hu, Ruslan Salakhutdinov, and Eric P. Xing. Deep kernel learning. _CoRR_ , abs/1511.02222, 2015. 
+
+- [29] Luca Bertinetto, João F. Henriques, Philip H. S. Torr, and Andrea Vedaldi. Meta-learning with differentiable closed-form solvers. In _ICLR (Poster)_ . OpenReview.net, 2019. 
+
+- [30] Tyler Ingebrand, Adam J. Thorpe, and Ufuk Topcu. Zero-shot transfer of neural odes. In _NeurIPS_ , 2024. 
+
+11 
+
+- [31] Olaf Ronneberger, Philipp Fischer, and Thomas Brox. U-net: Convolutional networks for biomedical image segmentation. In _MICCAI (3)_ , Lecture Notes in Computer Science, pages 234–241. Springer, 2015. 
+
+12 
+
+## **A Derivation of Theorem 1** 
+
+In this section, we show the derivation for Theorem 1, and additionally provide a diagram which makes the intuition clear. See Figure 4. In the proof, we omit the _ι_ superscript for conciseness. Note that we make the standard assumptions for this setting: _X_ 0 and _X_ 1 are independent, _p_ ( _x_ 0), _p_ ( _x_ 1) exists as densities with respect to the Lebesgue measure, _t <_ 1, the noise distribution is Gaussian, and the interpolation is linear. 
+
+_Proof._ 
+
+**==> picture [407 x 119] intentionally omitted <==**
+
+Fix _x_ 1 and let _h_ ( _x_ 0) = _xt −_ ( _tx_ 1 + (1 _− t_ ) _x_ 0). Then the (only) root _x[∗]_ 0[=] _xt_ 1 _−−txt_ 1[.][Using] � _f_ ( _x_ ) _δ_ ( _h_ ( _x_ )) _dx_ = _|_ det _fJ_ ( _hx_ ( _[∗] x_ ) _[∗]_ ) _|_[, and the fact that] _[ |]_[det] _[J][h]_[(] _[x]_ 0 _[∗]_[)] _[|]_[=] _[|]_[det][(] _[−]_[(1] _[ −][t]_[)] _[I]_[)] _[|]_[=] _[|]_[(1] _[ −][t]_[)] _[n][|]_[ for] our specific choice of _h_ , 
+
+**==> picture [250 x 59] intentionally omitted <==**
+
+Using the same trick as before on _p_ ( _xt_ ), 
+
+**==> picture [275 x 52] intentionally omitted <==**
+
+Then substituting back into (17), 
+
+**==> picture [250 x 89] intentionally omitted <==**
+
+**Sampling Procedure** To approximate this expectation for a given _x[ι] t_[,][we][first][sample][a][set][of] _x[ι]_ 1[’s.][Typically, this consists of the provided samples from the new distribution.][Then, for each] _[ x][ι,i]_ 1[,] compute the corresponding initial state _x[ι,i]_ 0[and then] _[ w][ι,i]_[=] _[ p]_[(] _[x][ι,i]_ 0[)][.][Normalize the] _[ w][ι,i]_[’s to account] for _EX_ 1[ _p_ ( _X_ 0 _[∗]_[)]][ with] _[w]_[˜] _[ι,j]_[=] _[ w][ι,j][/]_[ �] _[m] i_ =1 _[w][ι,i]_[.][Lastly, compute the empirical mean weighted by] _[w]_[˜] _[ι,i]_[,] 
+
+**==> picture [312 x 28] intentionally omitted <==**
+
+13 
+
+**==> picture [238 x 150] intentionally omitted <==**
+
+Figure 4: **Visualization of Theorem 1.** Consider a noise distribution (shown in blue) and a mixture of Gaussians target distribution (shown in red). For any given _xt_ (black point) and set of _x_ 1’s (red points), we may compute the corresponding _x[∗]_ 0[’s using the equation] _[ x][∗]_ 0[=] _[x][t]_ 1 _[−] −[tx] t_[1][.][However,] not all _x[∗]_ 0[’s are probable.][We represent the likelihood of] _[x][∗]_ 0 _[, x]_[1][given] _[x][t]_[via the thickness of the] line connecting them. Clearly, some pairs are more likely. Therefore, the expected velocity field E[ _X_ 1 _− X_ 0 _|Xt_ ] (green) will appear to align with the thicker of these lines. This is exactly why we need to consider the probability of _x[∗]_ 0[when computing the expected velocity field.] 
+
+## **B Function-Distribution Pairs** 
+
+We begin by generalizing this formulation. Let _F_ = _{f_ : _X →_ R _[n] |f_ measurable _}_ , where compact _X_ is the input space and R _[n]_ is the output space. Suppose we observe a finite subset _T_ = _{f[i] }[m] i_ =1 _[⊂] F_ , and a corresponding set of densities _P_ = _{p[i] X_[:] _[X][→]_[[0] _[,][ ∞]_[)] _[|][i][∈]_[1] _[...m][}]_[.][Each][density] _[p][i] X_ induces a Hilbert space _H[i]_ = _L_[2] ( _p[i] X_[)][ with inner product] _[⟨][f, g][⟩][i]_[=] � _X[f]_[(] _[x]_[)] _[⊤][g]_[(] _[x]_[)] _[p] X[i]_[(] _[x]_[)] _[dx]_[,][and] assume _f[i] ∈H[i] ._ Note that for _j_ = _i_ , it is possible that _f[j] ∈H/[i]_ . In other words, our set of functions may or may not exist in each other’s function spaces. 
+
+As is typical for the function encoder, our goal is to learn a set of functions _{g[j] }[k] j_ =1[such that for all] _i_ , _f[i] ≈_[�] _[k] j_ =1 _[c][i,j][g][j]_[where] _[ c][i][∈]_[R] _[k]_[.][This allows us to approximate] _[ f][ i]_[ with a linear combination of] our basis functions. As is typical, we compute the coefficients using least squares, 
+
+**==> picture [312 x 45] intentionally omitted <==**
+
+This requires _∀i, jg[j] ∈H[i]_ , i.e., the basis functions must be members of all Hilbert spaces. However, since we are approximating the basis functions with neural networks, they are continuous. Since _X_ is compact and _g[j]_ is continuous, then it follows from the extreme value theorem that each _g[j]_ is bounded by some maximum value _Mj_ . Therefore, 
+
+**==> picture [284 x 24] intentionally omitted <==**
+
+Therefore, _g[j] ∈H[i]_ . In other words, the basis functions are well-defined regardless of the density function. Thus, we only need to train the basis functions to span _{f[i] }_ , and then we may use them to approximate any such function _f[i]_ . Note that by using Equation (24), we implicitly assume we want to minimize the approximation error on points that are likely under _p[i] X_[, but assumption is quite] natural given the correspondence between _f[i]_ and _p[i] X_[.] 
+
+One interesting result of this formulation is that two functions _f[i] , f[j]_ may have the same representation, _c[i]_ = _c[j]_ , even if they differ on a set with measure greater than 0. For example, suppose the support of _p[i] X_[and] _[ p][j] X_[are disjoint; Then it is easy to see how they may have the same coefficient representation.] 
+
+14 
+
+**==> picture [238 x 95] intentionally omitted <==**
+
+**----- Start of picture text -----**<br>
+𝑋෨0𝜄 𝑋0𝜄 ≔  𝑋෨1𝜄 𝑋1𝜄<br>𝑋1𝜅<br>෤𝑣 [𝜄] ҧ𝑣<br>**----- End of picture text -----**<br>
+
+
+Figure 5: **Visualization of the Distribution-Guided Model.** Suppose we have trained a `Unconditional` model ¯ _v_ that maps a Normal distribution (middle) to a mixture of two Gaussians (right). The `Unconditional` model maps the top half of its noise distribution to the upper target Gaussian, and the bottom half to the lower target Gaussian. Then, we are interested in generating samples only from the upper Gaussian distribution (i.e., _v_ ˜ _[ι]_ which itself maps from a Normal distribution (left) to the upper half of the Normal distribution _X_ 1 _[ι]_[).][To do so, train a second velocity field] (middle, blue). Putting these together, a sample is first transitioned from _X_[˜] 0 _[ι]_[to] _[X]_[˜] 1 _[ι]_[via] _[v]_[˜] _[ι]_[,][then] transitioned from _X_ 0 _[ι]_[:=] _[X]_[˜] 1 _[ι]_[to] _[ X]_ 0 _[ι]_[via][ ¯] _[v]_[.][This process yields samples from the target distribution.] 
+
+This implies we use the same approximation for both functions because this approximation is the most accurate when measured via the corresponding inner product. In terms of flow matching, if the representation for two target distributions were the same, then they would have the same velocity field, and therefore the same sampling distribution. However, since every _Xt[ι]_[has the same noise] distribution, the supports of the distributions _p[ι] Xt[ι]_[overlap when] _[ t]_[=][0][, which helps to distinguish] between the velocity fields. We have not observed two separate velocity fields having the same coefficients in practice. 
+
+## **C Baselines** 
+
+**Unconditional** is a standard flow matching model trained on all of the training distributions as if they were a single distribution (e.g., a mixture). This acts as naive baseline, and as a starting point for some of the other algorithms. For obvious reasons, this baseline should perform poorly at all of TD, UD, US. 
+
+**Conditional** is a model provided with a conditioning variable to describe the target distribution, but is otherwise the same as an `Unconditional` model. For example, for _2D-Arcs_ , the conditioning variable is the angle of the center of the arc. While this allows the model to accurate learn the training distributions, it is unclear how this conditioning variable could generalize to a mixture of arcs, or a spiral. For _MNIST_ , the conditioning variable is a 10-dimensional vector with 1’s for classes within the mixture. Although this conditioning variable can describe mixtures (with multiple ones), it was not trained to do so and so it fails to generalize. Likewise, although it has a one-hot encoding of 9, it has not seen this during training and so it fails to generalize. _ImageNet_ uses a similar strategy as MNIST, with classes encoded into a vector. We expect this model to perform well on TD’s, but to fail on UD’s and US’s. 
+
+**Classifier-Guided** ˆ starts with a pre-trained, `Unconditional` model ¯ _v_ . Then, it trains a classifier _p[ι]_ : _X ×_ [0 _,_ 1] _→_ [0 _,_ 1] to label if a given state-time pair ( _xt, t_ ) belongs to the target distribution or not. The score of this classifier is used to guide the `Unconditional` model towards the desired distribution, 
+
+**==> picture [162 x 11] intentionally omitted <==**
+
+where _α_ is a hyper parameter. The intuition behind this idea is that the `Unconditional` model can generate samples from any of the training distributions, and so we only need to guide the model towards the target distribution using the gradient of the log density as estimated by our model. The main challenge with this method is choosing _α_ . To the best of our knowledge, there is not a consistent way of choosing _α_ , and it needs to be tuned per dataset and potentially even per distribution. Also, this requires training a classifier per each target distribution, which is similar in expense to finetuning. We expect this model to perform well on TD and US. However, it will typically perform poorly on US. 
+
+15 
+
+**Distribution-Guided** likewise starts with a pretrained `Unconditional` model ¯ _v_ . It then trains a secondary model ˜ _v[ι]_ to produce noise inputs that, when passed through the pretrained model, generate samples from the target distribution. Generating a sample has the following form: 
+
+**==> picture [106 x 109] intentionally omitted <==**
+
+Similar to `Classifier-Guided` , the idea is that the `Unconditional` model can already generate any sample in the training distributions. Thus, we only need to figure out which distribution of inputs to the `Unconditional` model will yield the target distribution. Then, we train a separate model to generate this starting distribution. See Figure 5. 
+
+While this approach is mathematically elegant, it has numerous practical downsides. First, to train the distribution-specific model, we must first compute the inputs to the `Unconditional` model that generate the target distribution. This involves starting with samples from the target distribution, and integrating backwards in time to recover the initial states. This backwards integration can be numerically unstable. Second, we must train an entirely separate flow matching model, which is expensive. Third, generation is now twice as expensive, since we have two models instead of one. We expect this model to succeed on TD and UD. It should fail on US, since it can only generate samples that the base `Unconditional` model is capable of generating. 
+
+**Finetune** is the standard approach. Given a pretrained unconditional model, finetune it on the data provided for the target distribution using the standard flow matching method. This approach can in theory perform well at all of TD, UD, US. However, since we are training then entire model, it may require many samples and a lot of compute to do so. 
+
+**Implementation Details.** Across all methods, we align training settings as closely as possible, including architectures, batch sizes, and optimizers. We use a Adam or AdamW optimizer with a learning rate of 1e-3 or 5e-4 and constant or cosine decay learning rate schedule. The architecture is dataset dependent: MLP for 2D Arcs, UNet [31] for MNIST, and latent ViT [16, 3] for ImageNet. For ImageNet, we use a pretrained VAE latent space. 2D Arcs and MNIST experiments are run on a desktop machine with a 3080. The ImageNet experiments are run on a cluster of 8 RTX PRO 6000 Blackwell GPUs. 2D Arcs experiments run in a few minutes, depending on the algorithm. MNIST experiments take a few hours. ImageNet experiments take about a day per algorithm. For all approaches involving additional training, we train for 1000 gradient steps using the Adam optimizer with a learning rate of 1 _e −_ 3. For `Distribution-Guided` , we use the same architecture as the `Unconditional` model. For `Classifier-Guided` , we use the same architecture as the `Unconditional` model except slightly modified to output probabilities. We train the classifier using cross entropy with positive samples from _Xt[ι]_[and negative samples from] _[ X] t[κ]_[for] _[ κ][ ̸]_[=] _[ ι]_[.] `[Finetune]` uses full finetuning for 2D Arcs and MNIST, and LoRA for ImageNet due to memory constraints. 
+
+ImageNet is significantly more challenging than the other datasets due to the high-dimensional and diverse nature of its images. We model each dimension of the latent as a separate function space, which slightly increases the expressivity of the coefficients. We also use one additional function encoder technique for ImageNet, which improves performance: 
+
+**Guided FP-FM** As introduced in [9], the _residuals method_ of function encoders represents a function as _f_ = _f_[¯] +[�] _[k] i_ =1 _[c][i][g][i][,]_[ where] _[f]_[¯][is a neural net trained to model the average function in the] training set. Therefore, the basis functions correct the error of mean function. We may leverage a similar technique in the flow matching setting, where _f_[¯] fits the mean velocity field, and the basis functions _guide_ this velocity field towards a specific distribution, similar to classifier-free guidance. 
+
+16 
+
+## **D Algorithms** 
+
+In this section, we provide the algorithm for each of our methods. Note that they largely follow the algorithm in [9]. The main difference between them is the sampling procedure. 
+
+## **Algorithm 1** `Static FP-FM` 
+
+**given** datasets _{D[ι] }ι∈T_ , learning rate _α_ Initialize basis _{g_ 1 _, . . . , gk}_ with parameters _θ_ **while** not converged **do** _// Initialize loss for gradient accumulation. L ←_ 0 _// For every distribution in the training set._ **for all** _ι ∈T_ **do** _// Define the samples. {x[ι,i]_ 1 _[}][m] i_ =1 _[←D][ι] {x[ι,i]_ 0 _[}][m] i_ =1 _[∼N]_[(0] _[, I]_[)] _{t[i] }[m] i_ =1 _[∼]_[Unif][([0] _[,]_[ 1])] _// Standard Xt definition. x[ι,i] t ←_ (1 _− t[i]_ ) _x[ι,i]_ 0[+] _[ t][i][x][ι,i]_ 1 _// Compute coefficients. The inner product is approximated using the samples. −_ 1 _⟨g_[1] _, g_[1] _⟩pt,Xιt . . . ⟨g_[1] _, g[k] ⟩pt,Xιt ⟨v[ι] , g_[1] _⟩pt,Xιt_     _c[ι] ←_ ... ... ... ...  _⟨g[k] , g_[1] _⟩pt,Xιt . . . ⟨g[k] , g[k] ⟩pt,Xιt_   _⟨v[ι] , g[k] ⟩pt,Xιt_  _// Define the approximated velocity field._ ˆ _v[ι]_ ( _·, ·_ ) :=[�] _[k] i_ =1 _[c][ι,i][g][i]_[(] _[·][,][ ·]_[)] _// Gradient accumulation. The norm is again approximated using the samples._ ˆ _L ← L_ + _∥v[ι] − v[ι] ∥_[2] _pt,Xιt_ **end for** _// Gradient descent. θ ← θ − α∇θ_ ( _L_ ) **end while return** _{g_ 1 _, . . . , gk}_ 
+
+17 
+
+**Algorithm 2** `Temporal FP-FM` **given** datasets _{D[ι] }ι∈T_ , learning rate _α_ Initialize basis _{g_ 1 _, . . . , gk}_ with parameters _θ_ **while** not converged **do** _// Initialize loss for gradient accumulation. L ←_ 0 _// For every distribution in the training set._ **for all** _ι ∈T_ **do** _// Important: Sample a single time t t ∼_ Unif([0 _,_ 1]) _// Define the samples. {x[ι,i]_ 1 _[}][m] i_ =1 _[←D][ι] {x[ι,i]_ 0 _[}][m] i_ =1 _[∼N]_[(0] _[, I]_[)] _// Standard Xt definition. x[ι,i] t ←_ (1 _− t_ ) _x[ι,i]_ 0[+] _[ tx][ι,i]_ 1 _// Compute coefficients. The inner product is approximated using the samples. −_ 1 _⟨gt_[1] _[, g] t_[1] _[⟩][p] Xt[ι][|][t] . . . ⟨gt_[1] _[, g] t[k][⟩][p] Xt[ι][|][t] ⟨v[ι] , gt_[1] _[⟩][p] Xt[ι][|][t]_     _c[ι]_ ( _t_ ) _←_ ... ... ... ...  _⟨gt[k][, g] t_[1] _[⟩][p] Xt[ι][|][t] . . . ⟨gt[k][, g] t[k][⟩][p] Xt[ι][|][t]_   _⟨v[ι] , gt[k][⟩][p] Xt[ι][|][t]_  _// Define the approximated velocity field. v_ ˆ _t[ι]_[(] _[·]_[) :=][ �] _[k] i_ =1 _[c][ι,i]_[(] _[t]_[)] _[g] t[i]_[(] _[·]_[)] _// Gradient accumulation. The norm is again approximated using the samples. L ← L_ + _∥vt[ι][−][v]_[ˆ] _t[ι][∥]_[2] _pXιt[|][t]_ **end for** _// Gradient descent. θ ← θ − α∇θ_ ( _L_ ) **end while return** _{g_ 1 _, . . . , gk}_ 
+
+18 
+
+**Algorithm 3** `Dynamic FP-FM` 
+
+**given** datasets _{D[ι] }ι∈T_ , learning rate _α_ Initialize basis _{g_ 1 _, . . . , gk}_ with parameters _θ_ **while** not converged **do** _// Initialize loss for gradient accumulation. L ←_ 0 _// For every distribution in the training set._ **for all** _ι ∈T_ **do** _// Define the samples. {x[ι,i]_ 1 _[}][m] i_ =1 _[←D][ι] {x[ι,i]_ 0 _[}][m] i_ =1 _[∼N]_[(0] _[, I]_[)] _{t[i] }[m] i_ =1 _[∼]_[Unif][([0] _[,]_[ 1])] _// Standard Xt definition. x[ι,i] t ←_ (1 _− t[i]_ ) _x[ι,i]_ 0[+] _[ t][i][x][ι,i]_ 1 _// Important: In the following for loop, we compute the noise samples from xt and x_ 0 _. // Therefore we delete the current noise samples to make this explicit._ Delete _{x[ι,i]_ 0 _[}][m] i_ =1 _// For every state-time._ **for all** ( _xt, t_ ) _∈{_ ( _x[ι,j] t[, t][j]_[)] _[}][m] j_ =1 **[do]** _// Compute x[∗]_ 0 _[as in Theorem 1] // For each xt, compute x[ι,i]_ 0 _[for all][ i][, meaning we have a set][ {][x][ι,i]_ 0 _[}] i[m]_ =1 _x[ι,i]_ 0 _[←][x][t][−]_ 1 _−[tx] t_ 1 _[ι,i] // Compute coefficients. The inner product is approximated using the samples. // See Appendix 1. −_ 1 _⟨g_[1] _, g_[1] _⟩pt,Xιt[|][t,Xt] . . . ⟨g_[1] _, g[k] ⟩pt,Xιt[|][t,Xt] ⟨v[ι] , g_[1] _⟩pt,Xιt[|][t,Xt]_     _c[ι]_ ( _xt, t_ ) _←_ ... ... ... ...  _⟨g[k] , g_[1] _⟩pt,Xιt[|][t,Xt] . . . ⟨g[k] , g[k] ⟩pt,Xιt[|][t,Xt]_   _⟨v[ι] , g[k] ⟩pt,Xιt[|][t,Xt]_  _// Define the approximated velocity field. v_ ˆ _[ι]_ ( _xt, t_ ) :=[�] _[k] i_ =1 _[c][ι,i]_[(] _[x][t][, t]_[)] _[g][i]_[(] _[x][t][, t]_[)] _// Gradient accumulation. The norm is again approximated using the samples._ ˆ _L ← L_ + _∥v[ι] − v[ι] ∥_[2] _pt,Xιt[|][t,Xt]_ **end for end for** _// Gradient descent. θ ← θ − α∇θ_ ( _L_ ) **end while return** _{g_ 1 _, . . . , gk}_ 
+
+19 
+
+## **E Full Results** 
+
+|Algorithm|Precision_↑_<br>TD<br>UD<br>US|Recall_↑_<br>TD<br>UD<br>US|Time (s)_↓_|
+|---|---|---|---|
+|||||
+|`Unconditional`<br>`Conditional`<br>`Classifier-Guided`<br>`Distribution-Guided`<br>`Finetune`<br>`Static FP-FM`<br>`Temporal FP-FM`<br>`Dynamic FP-FM`|0.075<br>0.194<br>0.001<br>_±_0.017<br>_±_0.046<br>_±_0.001<br>0.257<br>0.387<br>0.003<br>_±_0.030<br>_±_0.045<br>_±_0.001<br>0.272<br>0.465<br>0.004<br>_±_0.047<br>_±_0.049<br>_±_0.001<br>0.227<br>0.250<br>0.178<br>_±_0.016<br>_±_0.012<br>_±_0.012<br>0.213<br>0.255<br>0.176<br>_±_0.013<br>_±_0.013<br>_±_0.012<br>0.221<br>0.305<br>0.058<br>_±_0.105<br>_±_0.033<br>_±_0.005<br>0.506<br>0.690<br>0.488<br>_±_0.033<br>_±_0.020<br>_±_0.007<br>**0.931**<br>**0.976**<br>**0.734**<br>_±_**0.005**<br>_±_**0.004**<br>_±_**0.007**|0.978<br>0.979<br>0.029<br>_±_0.011<br>_±_0.010<br>_±_0.007<br>0.985<br>0.662<br>0.035<br>_±_0.008<br>_±_0.022<br>_±_0.012<br>0.810<br>0.824<br>0.097<br>_±_0.024<br>_±_0.021<br>_±_0.088<br>0.990<br>0.989<br>0.989<br>_±_0.001<br>_±_0.003<br>_±_0.002<br>0.987<br>0.988<br>0.987<br>_±_0.003<br>_±_0.002<br>_±_0.005<br>0.832<br>0.799<br>0.921<br>_±_0.075<br>_±_0.116<br>_±_0.036<br>0.980<br>0.979<br>0.988<br>_±_0.006<br>_±_0.003<br>_±_0.002<br>**0.965**<br>**0.962**<br>**0.890**<br>_±_**0.003**<br>_±_**0.003**<br>_±_**0.004**|0.07<br>_±_0.00<br>0.07<br>_±_0.00<br>7.20<br>_±_0.21<br>14.48<br>_±_0.10<br>4.93<br>_±_0.22<br>0.09<br>_±_0.00<br>0.98<br>_±_0.01<br>11.24<br>_±_0.03|
+
+
+
+Table 4: **2D Arc.** Comparison of methods across TD, UD, and US settings. Arrows indicate whether higher ( _↑_ ) or lower ( _↓_ ) is better. Results are meaned over 5 seeds. Standard deviation is shown after the _±_ symbol. 
+
+|Algorithm|Precision_↑_<br>TD<br>UD<br>US|Recall_↑_<br>TD<br>UD<br>US|FID_↓_<br>TD<br>UD<br>US|Time|
+|---|---|---|---|---|
+||||||
+|`Unconditional`<br>`Conditional`<br>`Classifier-Guided`<br>`Distribution-Guided`<br>`Finetune`<br>`Static FP-FM`<br>`Temporal FP-FM`<br>`Dynamic FP-FM`|0.296<br>0.442<br>0.306<br>_±_0.151<br>_±_0.223<br>_±_0.170<br>0.878<br>0.762<br>0.343<br>_±_0.014<br>_±_0.037<br>_±_0.132<br>0.562<br>0.641<br>0.403<br>_±_0.282<br>_±_0.321<br>_±_0.205<br>0.374<br>0.371<br>0.160<br>_±_0.039<br>_±_0.061<br>_±_0.192<br>0.376<br>0.408<br>0.340<br>_±_0.068<br>_±_0.072<br>_±_0.249<br>0.798<br>0.765<br>0.571<br>_±_0.005<br>_±_0.022<br>_±_0.108<br>0.787<br>0.778<br>0.589<br>_±_0.019<br>_±_0.009<br>_±_0.115<br>**0.935**<br>**0.938**<br>**0.903**<br>_±_**0.086**<br>_±_**0.083**<br>_±_**0.110**|0.698<br>0.698<br>0.694<br>_±_0.349<br>_±_0.349<br>_±_0.348<br>0.867<br>0.777<br>0.783<br>_±_0.015<br>_±_0.027<br>_±_0.097<br>0.732<br>0.728<br>0.686<br>_±_0.366<br>_±_0.364<br>_±_0.353<br>0.408<br>0.445<br>0.229<br>_±_0.048<br>_±_0.066<br>_±_0.282<br>0.377<br>0.383<br>0.557<br>_±_0.083<br>_±_0.040<br>_±_0.206<br>0.877<br>0.851<br>0.869<br>_±_0.022<br>_±_0.047<br>_±_0.044<br>0.885<br>0.894<br>0.889<br>_±_0.012<br>_±_0.021<br>_±_0.034<br>**0.925**<br>**0.929**<br>**0.937**<br>_±_**0.012**<br>_±_**0.006**<br>_±_**0.031**|100.30<br>93.13<br>98.79<br>_±_125.45<br>_±_127.96<br>_±_139.09<br>13.22<br>22.14<br>31.56<br>_±_0.54<br>_±_2.06<br>_±_2.81<br>83.61<br>84.30<br>91.66<br>_±_132.85<br>_±_133.88<br>_±_140.88<br>67.62<br>53.04<br>192.79<br>_±_44.63<br>_±_25.60<br>_±_177.95<br>40.83<br>40.95<br>29.24<br>_±_16.99<br>_±_3.55<br>_±_14.03<br>15.72<br>24.07<br>18.81<br>_±_1.04<br>_±_4.09<br>_±_1.18<br>14.13<br>17.64<br>17.21<br>_±_0.56<br>_±_1.03<br>_±_0.85<br>**10.44**<br>**10.64**<br>**11.25**<br>_±_**5.10**<br>_±_**5.38**<br>_±_**5.83**|9.93<br>_±_0.05<br>10.32<br>_±_0.04<br>28.16<br>_±_0.07<br>604.84<br>_±_3.02<br>209.35<br>_±_3.36<br>10.50<br>_±_0.04<br>20.61<br>_±_0.22<br>21.71<br>_±_0.12|
+
+
+
+Table 5: **MNIST.** Comparison of methods across TD, UD, and US settings. Arrows indicate whether higher ( _↑_ ) or lower ( _↓_ ) is better. Results are meaned over 5 seeds. Standard deviation is shown after the _±_ symbol. 
+
+20 
+
+## **F Ablations** 
+
+## **F.1 Number of Shots** 
+
+**==> picture [397 x 223] intentionally omitted <==**
+
+Figure 6: **Ablation on the Number of Shots.** We vary the number of shots both during training and evaluation for all three FP-FM baselines. Note that FID, precision, and recall are measured relative to the provided shots because, by assumption, this is all of the available data for the target distribution. 
+
+We vary the number of shots provided during training and evaluation on the MNIST dataset. For the sake of compute, use 1 seed. We observe that for all three FP-FM variants, FID decreases as the number of shots increases. `Dynamic FP-FM` has stable precision and recall as the number of shots increases. For `Static FP-FM` and `Temporal FP-FM` , precision may slightly decrease as the number of shots increases. This is likely a quirk of how precision is measured; As more shots are provided, the average distance between shots in feature space decreases, meaning that the union of epsilon balls approximating the manifold becomes shrinks, i.e., the epsilon becomes smaller (see [14]). Since precision measures how well generated data lies on this manifold, a tighter approximation of the manifold naturally suggests precision should decrease, all else held equal. 
+
+## **F.2 Number of Basis Functions** 
+
+We likewise ablate the number of basis functions on the MNIST dataset, over one seed. We find that the none of `Static FP-FM` , `Temporal FP-FM` , or `Dynamic FP-FM` are sensitive to the number of basis functions on this dataset, with only mild differences in performance. Generation time slightly increases as the number of basis functions increases because the cost of the least-squares solve increases. Since `Dynamic FP-FM` requires the most least-squares solves, its generation time is the most affected of all three FP-FM variants, though the increase is still small. 
+
+21 
+
+**==> picture [397 x 223] intentionally omitted <==**
+
+Figure 7: **Ablation on the Number of Basis Functions.** We vary the number of basis functions for all three FP-FM baselines on the MNIST dataset. 
+
+22

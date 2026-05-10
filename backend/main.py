@@ -224,12 +224,6 @@ def summarize_node_update(update: dict[str, Any]) -> dict[str, Any]:
 
     return summary
 
-
-@app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok"}
-
-
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest) -> ChatResponse:
     with logfire.span("chat", message=request.message):
@@ -331,8 +325,8 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
         max_pdf_pages = int(os.getenv("UPLOAD_MAX_PDF_PAGES", "30"))
-        chunk_size = int(os.getenv("ARXIV_CHUNK_SIZE", "800"))
-        chunk_overlap = int(os.getenv("ARXIV_CHUNK_OVERLAP", "100"))
+        chunk_size = int(os.getenv("ARXIV_CHUNK_SIZE", "1400"))
+        chunk_overlap = int(os.getenv("ARXIV_CHUNK_OVERLAP", "180"))
         include_sections_csv = os.getenv(
             "ARXIV_INCLUDE_SECTIONS",
             (

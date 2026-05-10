@@ -75,10 +75,14 @@ def get_embeddings() -> OpenAIEmbeddings:
 
 @lru_cache(maxsize=1)
 def get_vector_store() -> QdrantVectorStore:
+    validate_embeddings = bool_env("QDRANT_VALIDATE_EMBEDDINGS", False)
+    validate_collection_config = bool_env("QDRANT_VALIDATE_COLLECTION_CONFIG", False)
     return QdrantVectorStore.from_existing_collection(
         embedding=get_embeddings(),
         collection_name=os.getenv("QDRANT_COLLECTION", "arxiv_docs"),
         url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        validate_embeddings=validate_embeddings,
+        validate_collection_config=validate_collection_config,
     )
 
 
