@@ -8,6 +8,7 @@ from typing import Any, Literal, Sequence
 import logfire
 
 try:
+    from .prompts import AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT
     from .configuration import bool_env
     from .configuration import float_env
     from .configuration import get_embeddings
@@ -27,6 +28,7 @@ try:
     from .graph_utils import safe_float
     from .graph_utils import unwrap_metadata
 except ImportError:
+    from prompts import AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT
     from configuration import bool_env
     from configuration import float_env
     from configuration import get_embeddings
@@ -130,12 +132,12 @@ def summarize_documents_for_prompt(documents: list[dict[str, Any]], max_items: i
 
     lines: list[str] = []
     for idx, doc in enumerate(documents[:max_items], start=1):
-        title = str(doc.get("title", ""))[:120]
+        title = str(doc.get("title", ""))
         origin = str(doc.get("origin", ""))
-        source = str(doc.get("source", ""))[:120]
-        published = str(doc.get("published", doc.get("updated", "")))[:40]
+        source = str(doc.get("source", ""))
+        published = str(doc.get("published", doc.get("updated", "")))
         score = safe_float(doc.get("score", 0.0))
-        snippet = str(doc.get("content", "")).replace("\n", " ")[:180]
+        snippet = str(doc.get("content", "")).replace("\n", " ")
         lines.append(
             f"{idx}. origin={origin} score={score:.3f} title={title} "
             f"published={published or '-'} source={source} snippet={snippet}"
@@ -165,6 +167,214 @@ def resolve_requires_web(state: GraphState, question: str) -> bool:
         or bool(state.get("requires_web", False))
         or (relative_month_target(question) is not None)
     )
+
+
+AUTHOR_QUERY_PATTERNS = (
+    re.compile(r"\bwritten by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
+    re.compile(r"\bauthored by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
+    re.compile(r"\bpapers?\s+by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
+    re.compile(r"\bby\s+author\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
+)
+
+
+def normalize_author_name(value: str) -> str:
+    normalized = re.sub(r"\s+", " ", value.strip().strip("\"'"))
+    normalized = re.sub(r"^(?:an?\s+)?author\s+", "", normalized, flags=re.I)
+    return normalized.strip(" .,:;!?")
+
+
+def regex_extract_author_constraint(question: str) -> str | None:
+    for pattern in AUTHOR_QUERY_PATTERNS:
+        match = pattern.search(question)
+        if not match:
+            continue
+        candidate = normalize_author_name(match.group("author"))
+        if len(candidate) >= 3:
+            return candidate
+    return None
+
+
+def llm_extract_author_constraint(question: str) -> str | None:
+    if not bool_env("LLM_AUTHOR_QUERY_ENABLED", True):
+        return regex_extract_author_constraint(question)
+
+    parsed = llm_json_response(
+        llm=get_planner_llm(),
+        system_prompt=AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT,
+        human_prompt=f"Question: {question}",
+    )
+
+    if not parsed:
+        return regex_extract_author_constraint(question)
+
+    raw_flag = parsed.get("is_author_query", False)
+    if isinstance(raw_flag, str):
+        is_author_query = raw_flag.strip().lower() in {"1", "true", "yes", "y"}
+    else:
+        is_author_query = bool(raw_flag)
+
+    candidate = normalize_author_name(str(parsed.get("author", "")))
+    if is_author_query and len(candidate) >= 3:
+        return candidate
+
+    return regex_extract_author_constraint(question)
+
+
+def metadata_authors(metadata: dict[str, Any]) -> list[str]:
+    raw = metadata.get("authors", [])
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    if isinstance(raw, str):
+        return [part.strip() for part in re.split(r"[,;]", raw) if part.strip()]
+    return []
+
+
+def build_qdrant_document(
+    metadata: dict[str, Any],
+    content: str,
+    score: float,
+) -> dict[str, Any]:
+    return {
+        "title": str(metadata.get("title", "ArXiv document")),
+        "content": content,
+        "source": str(metadata.get("source_url", metadata.get("source", ""))),
+        "paper_id": str(metadata.get("paper_id", "")),
+        "section": str(metadata.get("section", metadata.get("section_title", ""))),
+        "authors": metadata_authors(metadata),
+        "published": str(metadata.get("published", "")),
+        "score": float(score),
+        "origin": "qdrant",
+    }
+
+
+def metadata_paper_group_key(metadata: dict[str, Any]) -> str:
+    return str(
+        metadata.get("paper_id")
+        or metadata.get("source_url")
+        or metadata.get("source")
+        or metadata.get("title")
+        or "unknown"
+    )
+
+
+def document_paper_group_key(document: dict[str, Any]) -> str:
+    return str(document.get("paper_id") or document.get("source") or document.get("title") or "unknown")
+
+
+def document_dedup_key(document: dict[str, Any]) -> str:
+    paper_id = str(document.get("paper_id", "")).strip().lower()
+    source = str(document.get("source", "")).strip().lower()
+    title = str(document.get("title", "")).strip().lower()
+    section = str(document.get("section", "")).strip().lower()
+    content_prefix = str(document.get("content", "")).strip().lower()[:200]
+    return "||".join([paper_id, source, title, section, content_prefix])
+
+
+def author_matches(metadata: dict[str, Any], requested_author: str) -> bool:
+    requested = normalize_author_name(requested_author).casefold()
+    if not requested:
+        return False
+
+    for candidate in metadata_authors(metadata):
+        normalized = normalize_author_name(candidate).casefold()
+        if not normalized:
+            continue
+        if requested in normalized or normalized in requested:
+            return True
+    return False
+
+
+def retrieve_documents_by_author(
+    vector_store: Any,
+    question: str,
+    requested_author: str,
+    max_scan_points: int,
+    max_author_candidates: int,
+    max_context_chunks: int,
+    max_chunks_per_paper: int,
+    max_unique_papers: int,
+) -> list[dict[str, Any]]:
+    client = getattr(vector_store, "client", None)
+    collection_name = getattr(vector_store, "collection_name", "")
+    if client is None or not collection_name:
+        return []
+
+    author_candidates: list[dict[str, Any]] = []
+    offset = None
+    scanned_points = 0
+    batch_size = min(256, max(1, max_scan_points))
+    reached_candidate_limit = False
+
+    while scanned_points < max_scan_points:
+        limit = min(batch_size, max_scan_points - scanned_points)
+        points, next_offset = client.scroll(
+            collection_name=collection_name,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+            offset=offset,
+        )
+        if not points:
+            break
+
+        scanned_points += len(points)
+
+        for point in points:
+            payload = getattr(point, "payload", None)
+            if not isinstance(payload, dict):
+                continue
+
+            raw_metadata = payload.get("metadata")
+            if not isinstance(raw_metadata, dict):
+                continue
+
+            metadata = unwrap_metadata(raw_metadata)
+            if not author_matches(metadata, requested_author):
+                continue
+
+            author_candidates.append(
+                build_qdrant_document(
+                    metadata=metadata,
+                    content=str(payload.get("page_content", "")),
+                    score=0.0,
+                )
+            )
+            if len(author_candidates) >= max_author_candidates:
+                reached_candidate_limit = True
+                break
+
+        if reached_candidate_limit:
+            break
+
+        if next_offset is None:
+            break
+        offset = next_offset
+
+    if not author_candidates:
+        return []
+
+    ranked_candidates = score_web_documents(question, author_candidates)
+    if not ranked_candidates:
+        ranked_candidates = author_candidates
+
+    documents: list[dict[str, Any]] = []
+    paper_chunk_counts: dict[str, int] = {}
+    for candidate in ranked_candidates:
+        paper_key = document_paper_group_key(candidate)
+
+        current_chunks = paper_chunk_counts.get(paper_key, 0)
+        if current_chunks >= max_chunks_per_paper:
+            continue
+        if current_chunks == 0 and len(paper_chunk_counts) >= max_unique_papers:
+            continue
+
+        documents.append(candidate)
+        paper_chunk_counts[paper_key] = current_chunks + 1
+
+        if len(documents) >= max_context_chunks:
+            break
+
+    return documents
 
 
 def temporal_window_label(year: int, month: int) -> str:
@@ -474,11 +684,60 @@ def retrieve(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     vector_store = get_vector_store()
     max_qdrant_candidates = int_env("MAX_QDRANT_CANDIDATES", 40)
+    max_author_scan_points = int_env("MAX_AUTHOR_SCAN_POINTS", 6000)
+    max_author_candidates = int_env("MAX_AUTHOR_CANDIDATES", 200)
     max_context_chunks = int_env("MAX_CONTEXT_CHUNKS", 10)
     max_chunks_per_paper = int_env("MAX_CHUNKS_PER_PAPER", 3)
     max_unique_papers = int_env("MAX_UNIQUE_PAPERS", 4)
     relevance_threshold = float_env("RELEVANCE_THRESHOLD", 0.65)
     force_web_fallback = bool_env("FORCE_WEB_FALLBACK", False)
+
+    requested_author = llm_extract_author_constraint(question)
+    if requested_author:
+        author_documents = retrieve_documents_by_author(
+            vector_store=vector_store,
+            question=question,
+            requested_author=requested_author,
+            max_scan_points=max_author_scan_points,
+            max_author_candidates=max_author_candidates,
+            max_context_chunks=max_context_chunks,
+            max_chunks_per_paper=max_chunks_per_paper,
+            max_unique_papers=max_unique_papers,
+        )
+        if not author_documents:
+            return {
+                "documents": [],
+                "fallback": True,
+                "top_score": 0.0,
+                "evidence_ok": False,
+                "web_attempts": 0,
+                "author_constraint": requested_author,
+                "react_trace": append_trace(
+                    state,
+                    (
+                        f"retrieve: author='{requested_author}' matched=0 "
+                        f"scan_limit={max_author_scan_points}; fallback requested"
+                    ),
+                ),
+            }
+
+        top_author_score = max((safe_float(doc.get("score", 0.0)) for doc in author_documents), default=0.0)
+        return {
+            "documents": author_documents,
+            "fallback": force_web_fallback,
+            "top_score": top_author_score,
+            "evidence_ok": False,
+            "web_attempts": 0,
+            "author_constraint": requested_author,
+            "react_trace": append_trace(
+                state,
+                (
+                    f"retrieve: author='{requested_author}' matched={len(author_documents)} "
+                    f"scan_limit={max_author_scan_points} candidate_limit={max_author_candidates} "
+                    f"top_score={top_author_score:.3f}"
+                ),
+            ),
+        }
 
     matches = vector_store.similarity_search_with_relevance_scores(question, k=max_qdrant_candidates)
     if not matches:
@@ -496,13 +755,7 @@ def retrieve(state: GraphState) -> dict[str, Any]:
     for doc, score in matches:
         top_score = max(top_score, float(score))
         metadata = unwrap_metadata(doc.metadata)
-        paper_key = str(
-            metadata.get("paper_id")
-            or metadata.get("source_url")
-            or metadata.get("source")
-            or metadata.get("title")
-            or "unknown"
-        )
+        paper_key = metadata_paper_group_key(metadata)
 
         current_chunks = paper_chunk_counts.get(paper_key, 0)
         if current_chunks >= max_chunks_per_paper:
@@ -511,16 +764,11 @@ def retrieve(state: GraphState) -> dict[str, Any]:
             continue
 
         documents.append(
-            {
-                "title": str(metadata.get("title", "ArXiv document")),
-                "content": doc.page_content,
-                "source": str(metadata.get("source_url", metadata.get("source", ""))),
-                "paper_id": str(metadata.get("paper_id", "")),
-                "section": str(metadata.get("section", "")),
-                "published": str(metadata.get("published", "")),
-                "score": float(score),
-                "origin": "qdrant",
-            }
+            build_qdrant_document(
+                metadata=metadata,
+                content=doc.page_content,
+                score=float(score),
+            )
         )
         paper_chunk_counts[paper_key] = current_chunks + 1
 
@@ -594,6 +842,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     documents = state.get("documents", [])
     temporal_target = relative_month_target(question)
     requires_web = resolve_requires_web(state, question)
+    requested_author = str(state.get("author_constraint", "")).strip()
 
     min_local_docs = int_env("MIN_LOCAL_DOCS", 2)
     min_web_docs = int_env("MIN_WEB_DOCS", 2)
@@ -605,7 +854,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     local_docs = [doc for doc in documents if str(doc.get("origin", "")) == "qdrant"]
     web_docs = [doc for doc in documents if str(doc.get("origin", "")) == "web"]
 
-    local_ok = len(local_docs) >= min_local_docs
+    local_ok = len(local_docs) >= (1 if requested_author else min_local_docs)
     web_rich_docs = [
         doc
         for doc in web_docs
@@ -667,6 +916,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
                 f"top_web_score={top_web_score:.3f} web_threshold={web_relevance_threshold:.3f} "
                 f"needs_more_web={needs_more_web} requires_web={requires_web} "
                 f"temporal_target={temporal_label} temporal_matches={len(temporal_matched_web_docs)} "
+                f"author_target={requested_author or '-'} "
                 f"missing_topics={';'.join(missing_topics) if missing_topics else '-'} "
                 f"reflection_reason={reflection_reason or '-'}"
             ),
@@ -698,11 +948,7 @@ def build_context(state: GraphState) -> dict[str, Any]:
     unique_documents: list[dict[str, Any]] = []
 
     for document in documents:
-        paper_id = str(document.get("paper_id", "")).strip().lower()
-        source = str(document.get("source", "")).strip().lower()
-        title = str(document.get("title", "")).strip().lower()
-        content_prefix = str(document.get("content", "")).strip().lower()[:120]
-        key = paper_id or source or title or content_prefix
+        key = document_dedup_key(document)
 
         if not key or key in seen_keys:
             continue
@@ -791,6 +1037,7 @@ def generate(state: GraphState) -> dict[str, Any]:
                 f"[{idx + 1}] {doc.get('title', 'Source')}\n"
                 f"Origin: {doc.get('origin', 'unknown')}\n"
                 f"URL: {doc.get('source', '')}\n"
+                f"Authors: {', '.join(doc.get('authors', [])) if isinstance(doc.get('authors', []), list) else doc.get('authors', '')}\n"
                 f"Published: {doc.get('published', doc.get('updated', ''))}\n"
                 f"Section: {doc.get('section', 'unknown')}\n"
                 f"{doc.get('content', '')}"

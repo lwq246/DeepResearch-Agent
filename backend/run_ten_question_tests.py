@@ -45,89 +45,100 @@ TEST_CASES: list[TestCase] = [
     TestCase(
         case_id="T01",
         question_type="Factual",
-        question="What algorithm is used to repair off-label vertices in the Image Classifiers paper?",
-        expected_ground_truth="A targeted DeepFool-style update procedure.",
+        question=(
+            "According to Lejun Gong's paper on the MedBLIP model, what specific "
+            "algorithm was used to enhance the text data of doctor-patient "
+            "question-answering?"
+        ),
+        expected_ground_truth=(
+            "A mirroring sample generation algorithm that transforms affirmative "
+            "questions into negative ones and creates contrasting scenarios."
+        ),
     ),
     TestCase(
         case_id="T02",
-        question_type="Factual",
-        question="What specific fine-tuning technique was used to reduce resources in the Event Log Analysis paper?",
-        expected_ground_truth="LoRA (Low-Rank Adaptation) parameter-efficient fine-tuning.",
+        question_type="Methodological",
+        question=(
+            "In the MedBLIP framework proposed by Lejun Gong and colleagues, what "
+            "specific unfreezing strategy was applied to the large language model's "
+            "decoder layers to achieve optimal performance?"
+        ),
+        expected_ground_truth=(
+            "They unfroze 31.25% of the fully connected layer weights, specifically "
+            "in the first five and last five decoder layers."
+        ),
     ),
     TestCase(
         case_id="T03",
-        question_type="Methodological",
-        question="How does PACE measure the plausibility score of a sample?",
-        expected_ground_truth=(
-            "Through an isolation forest, calculating the path length of a sample "
-            "through an isolation tree."
+        question_type="Numerical",
+        question=(
+            "Based on the experimental results in Lejun Gong's study, what were the "
+            "exact BLEU-1, ROUGE-1, and ROUGE-L scores for their highest-performing "
+            "model (MedBLIP-31.25-AUG-VC)?"
         ),
+        expected_ground_truth="BLEU-1: 62.10%, ROUGE-1: 67.30%, and ROUGE-L: 66.12%.",
     ),
     TestCase(
         case_id="T04",
-        question_type="Numerical",
+        question_type="Comparative",
         question=(
-            "What was the total cost and time taken to generate the synthetic dataset "
-            "using Claude 3.7 Sonnet?"
+            "In their data augmentation experiments, how does the team led by Lejun "
+            "Gong describe the results of using GANs versus their mirroring algorithm "
+            "for generating medical question-answer pairs?"
         ),
-        expected_ground_truth="It cost $23.02 and took 14 hours.",
+        expected_ground_truth=(
+            "GAN-based training was highly challenging and produced mostly unusable "
+            "samples with syntactic/logical collapse and confused medical terms, while "
+            "the mirroring algorithm was highly successful."
+        ),
     ),
     TestCase(
         case_id="T05",
-        question_type="Numerical",
+        question_type="Error Analysis",
         question=(
-            "In the Image Classifiers paper, how many loops were tested per model, "
-            "and how many models were tested?"
+            "According to the model error analysis provided in Lejun Gong's MedBLIP "
+            "research, why did the model fail to accurately identify the increasing "
+            "trend of a patient's edema?"
         ),
-        expected_ground_truth="1000 loops per model across 6 models (6000 loops total).",
+        expected_ground_truth=(
+            "The model relied only on static image data and failed to capture temporal "
+            "changes over time."
+        ),
     ),
     TestCase(
         case_id="T06",
-        question_type="Comparative",
+        question_type="Concept Retrieval",
         question=(
-            "In the PACE paper's ablation studies, what happens to the compressed "
-            "ensemble size when the confidence parameter (eta) is increased?"
+            "In the evaluation conducted by Lejun Gong's team, how exactly was cosine "
+            "similarity utilized to analyze the model's learning process?"
         ),
         expected_ground_truth=(
-            "Increasing confidence (relaxing faithfulness) improves pruning and "
-            "yields a smaller final ensemble."
+            "It measured the difference between original model weights and post-fine-"
+            "tuning weights to map how much medical knowledge was acquired."
         ),
     ),
     TestCase(
         case_id="T07",
-        question_type="Comparative",
-        question="Which SLM was the fastest during the testing phase of the Event Log Analysis paper?",
-        expected_ground_truth="Gemma 7b (0:05 days:hours).",
+        question_type="Anti-Hallucination",
+        question=(
+            "Does Lejun Gong's paper claim that the MedBLIP model is now capable of "
+            "fully replacing human radiologists for complex clinical diagnoses?"
+        ),
+        expected_ground_truth=(
+            "No. The model cannot fully replace human radiologists and is positioned as "
+            "an auxiliary efficiency tool."
+        ),
     ),
     TestCase(
         case_id="T08",
-        question_type="Synthesis",
-        question=(
-            "What is a common theme regarding resources or computation in both the "
-            "PACE paper and the Event Log Analysis paper?"
-        ),
-        expected_ground_truth=(
-            "Both reduce computational overhead for deployment (PACE via model compression, "
-            "Event Log via SLMs plus LoRA)."
-        ),
-    ),
-    TestCase(
-        case_id="T09",
         question_type="Out-of-scope",
-        question="What is the stock price of the company that created the Claude 3.7 model?",
-        expected_ground_truth=(
-            "Graceful refusal based on scope: cannot answer from provided research papers."
-        ),
-    ),
-    TestCase(
-        case_id="T10",
-        question_type="Anti-Hallucination",
         question=(
-            "Does the Image Classifiers paper prove mathematically that all decision "
-            "regions are simply connected?"
+            "What was the exact hardware cost to purchase the Nvidia 3090 GPUs used "
+            "by Lejun Gong to train MedBLIP?"
         ),
         expected_ground_truth=(
-            "No. The paper reports finite-resolution empirical evidence, not a formal proof."
+            "Cannot be answered from the provided papers; the paper mentions Nvidia "
+            "3090 24GB usage but not purchase cost."
         ),
     ),
 ]
@@ -150,54 +161,59 @@ def evaluate_answer(case_id: str, answer: str) -> tuple[bool, str]:
     text = normalize(raw)
 
     if case_id == "T01":
-        ok = "deepfool" in text and contains_any(text, ["targeted", "target"]) and contains_any(
-            text, ["update", "procedure", "step"]
-        )
-        return ok, "Expected DeepFool-style targeted update procedure"
+        has_mirroring = contains_any(text, ["mirroring", "mirror"])
+        has_generation = contains_any(text, ["sample generation", "generation algorithm", "augmentation"])
+        has_transformation = contains_any(text, ["affirmative", "negative", "contrasting", "contrastive"])
+        ok = has_mirroring and has_generation and has_transformation
+        return ok, "Expected mirroring sample-generation algorithm with affirmative/negative contrast"
 
     if case_id == "T02":
-        ok = contains_any(text, ["lora", "low-rank adaptation", "low rank adaptation"])
-        return ok, "Expected LoRA / Low-Rank Adaptation"
+        has_ratio = bool(re.search(r"\b31(?:\.25)?\s*%?\b", text))
+        has_layers = contains_any(text, ["first five", "last five", "decoder", "layers"])
+        has_unfreeze = contains_any(text, ["unfreeze", "unfroze", "unfreezing"])
+        ok = has_ratio and has_layers and has_unfreeze
+        return ok, "Expected 31.25% unfreezing in first/last five decoder layers"
 
     if case_id == "T03":
-        ok = "isolation forest" in text and contains_any(text, ["path length", "path-length", "path"]) and contains_any(
-            text, ["isolation tree", "tree"]
-        )
-        return ok, "Expected isolation forest path-length explanation"
+        has_bleu = bool(re.search(r"\b62(?:\.1|\.10)?\b", text))
+        has_rouge1 = bool(re.search(r"\b67(?:\.3|\.30)?\b", text))
+        has_rougel = bool(re.search(r"\b66(?:\.12)?\b", text))
+        ok = has_bleu and has_rouge1 and has_rougel
+        return ok, "Expected BLEU-1 62.10, ROUGE-1 67.30, ROUGE-L 66.12"
 
     if case_id == "T04":
-        has_cost = bool(re.search(r"\$?\s*23(?:\.0?2)?", raw.lower()))
-        has_time = bool(re.search(r"\b14\s*(hours?|hrs?|h)\b", raw.lower()))
-        ok = has_cost and has_time
-        return ok, "Expected both $23.02 and 14 hours"
+        has_gan_failure = contains_any(text, ["gan", "gans"]) and contains_any(
+            text,
+            ["challenging", "unusable", "collapse", "confused medical", "syntactic", "logical"],
+        )
+        has_mirroring_success = contains_any(text, ["mirroring", "mirror"]) and contains_any(
+            text, ["successful", "better", "worked", "effective"]
+        )
+        ok = has_gan_failure and has_mirroring_success
+        return ok, "Expected GAN difficulty/failure contrasted with mirroring success"
 
     if case_id == "T05":
-        has_1000 = bool(re.search(r"\b1000\b", text))
-        has_6_models = bool(re.search(r"\b6\b", text)) and contains_any(text, ["model", "models"])
-        has_6000 = bool(re.search(r"\b6000\b", text))
-        ok = has_1000 and has_6_models and has_6000
-        return ok, "Expected 1000 loops, 6 models, and 6000 total"
+        has_static_only = contains_any(text, ["static image", "static", "single image"])
+        has_temporal_gap = contains_any(text, ["temporal", "over time", "dynamic", "trend"])
+        has_edema = "edema" in text
+        ok = has_static_only and has_temporal_gap and has_edema
+        return ok, "Expected static-image limitation and missed temporal edema trend"
 
     if case_id == "T06":
-        has_direction = contains_any(text, ["increase", "increased", "higher", "relax"])
-        has_effect = contains_any(text, ["smaller", "reduce", "reduced", "decrease", "pruning"])
-        has_object = contains_any(text, ["ensemble", "compressed ensemble", "final ensemble"])
-        ok = has_direction and has_effect and has_object
-        return ok, "Expected increased eta -> stronger pruning -> smaller ensemble"
+        has_cosine = contains_any(text, ["cosine similarity", "cosine"])
+        has_weights = contains_any(text, ["weights", "original", "fine-tuning", "fine tuned", "after fine-tuning"])
+        has_learning_map = contains_any(text, ["learn", "acquired", "medical knowledge", "remembered"])
+        ok = has_cosine and has_weights and has_learning_map
+        return ok, "Expected cosine similarity between pre/post fine-tuning weights to map learning"
 
     if case_id == "T07":
-        ok = contains_all(text, ["gemma", "7b"])
-        return ok, "Expected Gemma 7b as fastest SLM"
+        has_no = bool(re.search(r"\bno\b", text)) or "not" in text
+        has_not_replace = contains_any(text, ["cannot fully replace", "not replace", "cannot replace", "auxiliary"])
+        has_radiologist = contains_any(text, ["radiologist", "radiologists"])
+        ok = has_no and has_not_replace and has_radiologist
+        return ok, "Expected explicit statement that MedBLIP does not replace radiologists"
 
     if case_id == "T08":
-        has_resource_theme = contains_any(text, ["resource", "computation", "computational", "latency", "overhead", "cost"])
-        has_reduction = contains_any(text, ["reduce", "reduced", "lower", "optimiz", "efficient"])
-        has_pace_side = contains_any(text, ["pace", "ensemble", "compression", "model size"])
-        has_event_side = contains_any(text, ["event log", "slm", "lora", "small language model"])
-        ok = has_resource_theme and has_reduction and has_pace_side and has_event_side
-        return ok, "Expected shared resource/computation reduction theme across both papers"
-
-    if case_id == "T09":
         has_refusal = contains_any(
             text,
             [
@@ -211,16 +227,10 @@ def evaluate_answer(case_id: str, answer: str) -> tuple[bool, str]:
                 "do not have",
             ],
         )
-        hallucinated_price = bool(re.search(r"\$\s*\d", raw)) or "stock price is" in text
-        ok = has_refusal and not hallucinated_price
-        return ok, "Expected graceful refusal for out-of-scope stock-price question"
-
-    if case_id == "T10":
-        has_no = bool(re.search(r"\bno\b", text)) or "not" in text
-        has_nonproof = contains_any(text, ["not a formal", "rather than a formal", "not formal", "no formal proof", "not prove mathematically"])
-        has_empirical = contains_any(text, ["empirical", "finite-resolution", "finite resolution"])
-        ok = has_no and (has_nonproof or has_empirical)
-        return ok, "Expected explicit non-proof + empirical evidence framing"
+        mentions_missing_cost = contains_any(text, ["not stated", "not provided", "no cost", "purchase cost"])
+        hallucinated_price = bool(re.search(r"\$\s*\d", raw)) or contains_any(text, ["cost was", "price was"])
+        ok = (has_refusal or mentions_missing_cost) and not hallucinated_price
+        return ok, "Expected refusal/insufficient-info response with no fabricated GPU price"
 
     return False, "Unknown case id"
 
@@ -370,7 +380,7 @@ def run_tests(base_url: str, endpoint: str, timeout: float) -> list[TestResult]:
 
 def print_summary(results: list[TestResult]) -> None:
     print()
-    print("=== Ten-Question Evaluation Summary ===")
+    print("=== Golden QA Evaluation Summary ===")
     print(
         f"{'Case':<6} {'Type':<18} {'Status':<8} {'Latency(s)':<11} {'Sources':<8} {'Evidence':<9} {'WebTry':<7}"
     )
@@ -424,7 +434,7 @@ def parse_args() -> argparse.Namespace:
     default_report_path = script_dir / "logs" / "ten_question_eval_latest.json"
 
     parser = argparse.ArgumentParser(
-        description="Run the 10 benchmark QA test questions against the local RAG API."
+        description="Run the MedBLIP disambiguated Golden QA benchmark against the local RAG API."
     )
     parser.add_argument(
         "--base-url",

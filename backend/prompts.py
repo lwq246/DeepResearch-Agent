@@ -18,6 +18,13 @@ QUERY_REWRITE_SYSTEM_PROMPT = (
     "Return only JSON: {\"query\": \"...\"}."
 )
 
+AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT = (
+    "Extract whether the user is asking for papers by a specific author. "
+    "Return strict JSON only with keys: is_author_query (boolean) and author (string). "
+    "If the request is not an author query, return "
+    "{\"is_author_query\": false, \"author\": \"\"}."
+)
+
 REFLECTION_SYSTEM_PROMPT = (
     "You are an evidence evaluation node. Your goal is to determine if we have 'good enough' "
     "information to provide a helpful response without further searching.\n\n"

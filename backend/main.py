@@ -1,42 +1,45 @@
+import logging
 import os
 from typing import Any
 
-import fitz
 import logfire
 from fastapi import FastAPI
 from fastapi import File
 from fastapi import HTTPException
 from fastapi import UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
 try:
+    from .ingest import build_author_check_llm
+    from .ingest import build_section_documents
     from .graph import app as lang_graph
-    from .ingest import is_section_selected
+    from .ingest import chunk_sections_from_extracted_text
+    from .ingest import extract_authors_from_first_page
+    from .ingest import extract_pdf_text_with_pymupdf4llm_from_bytes
     from .models.api_models import ChatDebugResponse
     from .models.api_models import ChatRequest
     from .models.api_models import ChatResponse
     from .models.api_models import ChatStreamDebugResponse
     from .models.api_models import NodeUpdate
     from .models.api_models import UploadPdfResponse
-    from .ingest import normalize_pdf_text
-    from .ingest import parse_csv_list
-    from .ingest import split_into_sections
+    from .ingest import parse_max_pdf_pages
 except ImportError:
+    from ingest import build_author_check_llm
+    from ingest import build_section_documents
     from graph import app as lang_graph
-    from ingest import is_section_selected
+    from ingest import chunk_sections_from_extracted_text
+    from ingest import extract_authors_from_first_page
+    from ingest import extract_pdf_text_with_pymupdf4llm_from_bytes
     from models.api_models import ChatDebugResponse
     from models.api_models import ChatRequest
     from models.api_models import ChatResponse
     from models.api_models import ChatStreamDebugResponse
     from models.api_models import NodeUpdate
     from models.api_models import UploadPdfResponse
-    from ingest import normalize_pdf_text
-    from ingest import parse_csv_list
-    from ingest import split_into_sections
+    from ingest import parse_max_pdf_pages
 
 
 app = FastAPI(title="ArXiv RAG Agent API")
@@ -64,6 +67,7 @@ def configure_logfire(app_instance: FastAPI) -> None:
 
 
 configure_logfire(app)
+logger = logging.getLogger(__name__)
 
 
 def openai_client_kwargs() -> dict[str, str]:
@@ -73,77 +77,35 @@ def openai_client_kwargs() -> dict[str, str]:
     return {"base_url": base_url}
 
 
-def extract_pdf_text(pdf_bytes: bytes, max_pages: int) -> str:
-    document = fitz.open(stream=pdf_bytes, filetype="pdf")
-    try:
-        page_count = min(max_pages, document.page_count)
-        text_chunks: list[str] = []
-        for page_index in range(page_count):
-            text = document.load_page(page_index).get_text("text")
-            if text.strip():
-                text_chunks.append(text)
-        return normalize_pdf_text("\n".join(text_chunks))
-    finally:
-        document.close()
+def extract_pdf_text(pdf_bytes: bytes, max_pages: int | None) -> str:
+    return extract_pdf_text_with_pymupdf4llm_from_bytes(pdf_bytes=pdf_bytes, max_pages=max_pages)
 
 
 def build_upload_documents(
     filename: str,
     source_value: str,
     extracted_text: str,
-    chunk_size: int,
-    chunk_overlap: int,
-    include_sections_csv: str,
-    exclude_sections_csv: str,
-    fallback_section_keywords_csv: str,
+    authors: list[str],
+    min_chunk_chars: int,
+    max_chunk_chars: int,
+    chunk_overlap_chars: int,
+    exclude_references: bool,
 ) -> list[Document]:
-    include_sections = parse_csv_list(include_sections_csv)
-    exclude_sections = parse_csv_list(exclude_sections_csv)
-    fallback_section_keywords = parse_csv_list(fallback_section_keywords_csv)
-
-    sections = split_into_sections(extracted_text, fallback_section_keywords)
-    selected_sections: list[tuple[str, str]] = []
-    for section_name, section_content in sections:
-        if is_section_selected(section_name, include_sections, exclude_sections):
-            selected_sections.append((section_name, section_content))
-
-    if not selected_sections:
-        selected_sections = [("full_text", extracted_text)]
-
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
+    sections = chunk_sections_from_extracted_text(
+        extracted_text=extracted_text,
+        min_chars=min_chunk_chars,
+        max_chars=max_chunk_chars,
+        chunk_overlap_chars=chunk_overlap_chars,
+        exclude_references=exclude_references,
     )
 
-    documents: list[Document] = []
-    full_text_length = len(extracted_text)
-    for section_index, (section_name, section_content) in enumerate(selected_sections):
-        chunks = splitter.split_text(section_content)
-        for chunk_index, chunk in enumerate(chunks):
-            documents.append(
-                Document(
-                    page_content=chunk,
-                    metadata={
-                        "title": filename,
-                        "paper_id": filename,
-                        "source_url": source_value,
-                        "pdf_url": source_value,
-                        "published": "",
-                        "updated": "",
-                        "primary_category": "",
-                        "categories": [],
-                        "dataset": "uploaded_pdf",
-                        "query": "manual_upload",
-                        "content_source": "pdf_full_text",
-                        "full_text_length": full_text_length,
-                        "section": section_name,
-                        "section_index": section_index,
-                        "chunk_index": chunk_index,
-                    },
-                )
-            )
-
-    return documents
+    base_metadata = {
+        "title": filename,
+        "paper_id": filename,
+        "source_url": source_value,
+        "authors": authors,
+    }
+    return build_section_documents(base_metadata=base_metadata, sections=sections)
 
 
 def print_upload_summary(
@@ -162,8 +124,8 @@ def print_upload_summary(
     )
 
     for document in documents[:preview_chunks]:
-        section_name = document.metadata.get("section", "?")
-        chunk_index = document.metadata.get("chunk_index", "?")
+        section_name = document.metadata.get("section_title", "?")
+        chunk_index = document.metadata.get("section_index", "?")
         preview_text = document.page_content.replace("\n", " ").strip()
         if len(preview_text) > preview_chars:
             preview_text = preview_text[:preview_chars] + "..."
@@ -324,24 +286,35 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
         if not pdf_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        max_pdf_pages = int(os.getenv("UPLOAD_MAX_PDF_PAGES", "30"))
-        chunk_size = int(os.getenv("ARXIV_CHUNK_SIZE", "1400"))
-        chunk_overlap = int(os.getenv("ARXIV_CHUNK_OVERLAP", "180"))
-        include_sections_csv = os.getenv(
-            "ARXIV_INCLUDE_SECTIONS",
-            (
-                "abstract,introduction,background,related work,method,methodology,approach,"
-                "experiment,experiments,results,discussion,conclusion,limitations"
-            ),
+        max_pdf_pages = parse_max_pdf_pages(os.getenv("UPLOAD_MAX_PDF_PAGES", "all"))
+        min_chunk_chars = int(os.getenv("ARXIV_MIN_CHUNK_CHARS", "80"))
+        max_chunk_chars = int(os.getenv("ARXIV_MAX_CHUNK_CHARS", os.getenv("ARXIV_CHUNK_SIZE", "2500")))
+        chunk_overlap_chars = int(
+            os.getenv("ARXIV_CHUNK_OVERLAP_CHARS", os.getenv("ARXIV_CHUNK_OVERLAP", "500"))
         )
-        exclude_sections_csv = os.getenv(
-            "ARXIV_EXCLUDE_SECTIONS",
-            "references,acknowledgements,acknowledgments,appendix",
-        )
-        fallback_section_keywords_csv = os.getenv(
-            "ARXIV_FALLBACK_SECTION_KEYWORDS",
-            "abstract,introduction,method,approach,experiment,results,conclusion",
-        )
+        exclude_references = os.getenv("ARXIV_EXCLUDE_REFERENCES", "true").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+        upload_llm_author_check = os.getenv(
+            "UPLOAD_LLM_AUTHOR_CHECK_FIRST_PAGE",
+            os.getenv("ARXIV_LLM_AUTHOR_CHECK_FIRST_PAGE", "true"),
+        ).strip().lower() in {"1", "true", "yes", "on"}
+
+        authors: list[str] = []
+        if upload_llm_author_check:
+            try:
+                authors = extract_authors_from_first_page(
+                    pdf_bytes=pdf_bytes,
+                    fallback_authors=[],
+                    author_check_llm=build_author_check_llm(),
+                )
+            except Exception as exc:
+                logger.warning("Upload author extraction failed for %s: %s", filename, exc)
+                authors = []
 
         extracted_text = extract_pdf_text(pdf_bytes=pdf_bytes, max_pages=max_pdf_pages)
         if not extracted_text:
@@ -352,11 +325,11 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
             filename=filename,
             source_value=source_value,
             extracted_text=extracted_text,
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            include_sections_csv=include_sections_csv,
-            exclude_sections_csv=exclude_sections_csv,
-            fallback_section_keywords_csv=fallback_section_keywords_csv,
+            authors=authors,
+            min_chunk_chars=min_chunk_chars,
+            max_chunk_chars=max_chunk_chars,
+            chunk_overlap_chars=chunk_overlap_chars,
+            exclude_references=exclude_references,
         )
         if not documents:
             raise HTTPException(status_code=400, detail="Failed to split PDF into section-aware chunks.")

@@ -1,7 +1,9 @@
 import argparse
+import json
 import os
 import re
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ import arxiv
 import requests
 from dotenv import load_dotenv
 from langchain_core.documents import Document
+from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
@@ -63,6 +66,26 @@ def bool_env(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def int_env_default(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def float_env_default(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 def parse_max_pdf_pages(value: str | None) -> int | None:
@@ -343,7 +366,6 @@ def chunk_sections_from_extracted_text(
     max_chars: int,
     chunk_overlap_chars: int,
     exclude_references: bool,
-    default_page_end: int | None,
 ) -> list[dict[str, Any]]:
     if not extracted_text.strip():
         return []
@@ -352,7 +374,6 @@ def chunk_sections_from_extracted_text(
     normalized_text = truncate_text_at_references(precleaned_text) if exclude_references else precleaned_text
     lines = normalized_text.splitlines()
 
-    safe_page_end = max(1, default_page_end or 1)
     raw_sections: list[dict[str, Any]] = []
 
     current_title = "Preamble"
@@ -366,8 +387,6 @@ def chunk_sections_from_extracted_text(
             {
                 "section_title": normalize_section_title(current_title),
                 "chunk_text": content,
-                "page_start": 1,
-                "page_end": safe_page_end,
             }
         )
 
@@ -390,8 +409,6 @@ def chunk_sections_from_extracted_text(
             {
                 "section_title": "Preamble",
                 "chunk_text": fallback_text,
-                "page_start": 1,
-                "page_end": safe_page_end,
             }
         ]
 
@@ -416,8 +433,6 @@ def chunk_sections_from_extracted_text(
             cleaned_sections.append(
                 {
                     "section_title": part_title,
-                    "page_start": int(section["page_start"]),
-                    "page_end": int(section["page_end"]),
                     "chunk_text": part_text,
                 }
             )
@@ -466,6 +481,9 @@ def fetch_arxiv_results(
     limit: int,
     sort_by: str,
     sort_order: str,
+    request_delay_seconds: float,
+    http_429_max_retries: int,
+    http_429_backoff_seconds: int,
 ) -> list[arxiv.Result]:
     search = arxiv.Search(
         query=query,
@@ -474,8 +492,133 @@ def fetch_arxiv_results(
         sort_order=parse_sort_order(sort_order),
     )
 
-    client = arxiv.Client(page_size=min(100, limit), delay_seconds=3.0, num_retries=5)
-    return list(client.results(search))
+    client = arxiv.Client(
+        page_size=min(100, limit),
+        delay_seconds=max(3.0, request_delay_seconds),
+        num_retries=1,
+    )
+
+    attempt = 0
+    while True:
+        try:
+            return list(client.results(search))
+        except arxiv.HTTPError as exc:
+            if exc.status != 429 or attempt >= http_429_max_retries:
+                raise
+
+            sleep_seconds = min(900, http_429_backoff_seconds * (2**attempt))
+            print(
+                "arXiv rate limit hit (HTTP 429). "
+                f"Retrying in {sleep_seconds}s (attempt {attempt + 1}/{http_429_max_retries})."
+            )
+            time.sleep(sleep_seconds)
+            attempt += 1
+
+def build_author_check_llm() -> ChatOpenAI:
+    return ChatOpenAI(
+        model=os.getenv("OPENAI_AUTHOR_CHECK_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")),
+        temperature=0,
+        max_tokens=int_env_default("OPENAI_AUTHOR_CHECK_MAX_TOKENS", 160),
+        **openai_client_kwargs(),
+    )
+
+def parse_json_object(raw_text: str) -> dict[str, Any] | None:
+    text = raw_text.strip()
+    candidates = [text]
+
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        candidates.insert(0, text[start : end + 1])
+
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
+
+def normalize_author_list(values: list[Any]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        name = str(item).strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(name)
+    return normalized
+
+def extract_authors_from_first_page(
+    pdf_bytes: bytes,
+    fallback_authors: list[str],
+    author_check_llm: ChatOpenAI,
+) -> list[str]:
+    first_page_text = extract_pdf_text_with_pymupdf4llm_from_bytes(pdf_bytes=pdf_bytes, max_pages=1)
+    if not first_page_text.strip():
+        return fallback_authors
+
+    response = author_check_llm.invoke(
+        [
+            (
+                "system",
+                (
+                    "Extract paper author names from first-page text. "
+                    "Return strict JSON only with this schema: "
+                    '{"authors": ["Author One", "Author Two"]}. '
+                    "Do not include affiliations, emails, or explanations."
+                ),
+            ),
+            (
+                "human",
+                f"First page text:\n{first_page_text[:12000]}",
+            ),
+        ]
+    )
+
+    response_text = response.content if isinstance(response.content, str) else str(response.content)
+    parsed = parse_json_object(response_text)
+    if not parsed:
+        return fallback_authors
+
+    maybe_authors = parsed.get("authors")
+    if not isinstance(maybe_authors, list):
+        return fallback_authors
+
+    normalized = normalize_author_list(maybe_authors)
+    return normalized if normalized else fallback_authors
+
+
+def build_section_documents(base_metadata: dict[str, Any], sections: list[dict[str, Any]]) -> list[Document]:
+    docs: list[Document] = []
+    for section in sections:
+        docs.append(
+            Document(
+                page_content=str(section["chunk_text"]),
+                metadata={
+                    **base_metadata,
+                    "section_title": str(section["section_title"]),
+                    "section_index": int(section["section_index"]),
+                },
+            )
+        )
+    return docs
+
+
+def build_abstract_document(base_metadata: dict[str, Any], abstract: str) -> Document:
+    return Document(
+        page_content=abstract,
+        metadata={
+            **base_metadata,
+            "section_title": "abstract",
+            "section_index": 0,
+        },
+    )
 
 
 def build_documents_from_local_pdf(
@@ -485,6 +628,7 @@ def build_documents_from_local_pdf(
     max_chunk_chars: int,
     chunk_overlap_chars: int,
     exclude_references: bool,
+    llm_author_check_first_page: bool = False,
 ) -> list[Document]:
     path = Path(pdf_path)
     if not path.exists() or not path.is_file():
@@ -501,43 +645,34 @@ def build_documents_from_local_pdf(
         max_chars=max_chunk_chars,
         chunk_overlap_chars=chunk_overlap_chars,
         exclude_references=exclude_references,
-        default_page_end=max_pdf_pages,
     )
 
     title = path.stem
     source_url = str(path.resolve())
+    authors: list[str] = []
+    if llm_author_check_first_page:
+        try:
+            authors = extract_authors_from_first_page(
+                pdf_bytes=pdf_bytes,
+                fallback_authors=[],
+                author_check_llm=build_author_check_llm(),
+            )
+        except Exception:  # noqa: BLE001
+            authors = []
+
     base_metadata = {
         "title": title,
         "paper_id": title,
         "source_url": source_url,
-        "published": "",
-        "categories": ["local_pdf"],
-        "authors": [],
+        "authors": authors,
     }
 
-    docs: list[Document] = []
-    for section in sections:
-        docs.append(
-            Document(
-                page_content=str(section["chunk_text"]),
-                metadata={
-                    **base_metadata,
-                    "content_source": "pdf_fulltext_pymupdf4llm",
-                    "extractor": "pymupdf4llm",
-                    "section_title": str(section["section_title"]),
-                    "section_index": int(section["section_index"]),
-                    "page_start": int(section["page_start"]),
-                    "page_end": int(section["page_end"]),
-                },
-            )
-        )
+    docs = build_section_documents(base_metadata=base_metadata, sections=sections)
 
     print(
         f"Local PDF summary: path='{path}', sections={len(sections)}, chunks={len(docs)}."
     )
-
     return docs
-
 
 def build_documents(
     rows: list[arxiv.Result],
@@ -548,30 +683,49 @@ def build_documents(
     max_chunk_chars: int,
     chunk_overlap_chars: int,
     exclude_references: bool,
+    llm_author_check_first_page: bool,
 ) -> list[Document]:
     docs: list[Document] = []
     fulltext_success_count = 0
     abstract_fallback_count = 0
+    author_check_llm = build_author_check_llm() if llm_author_check_first_page else None
 
     for row in rows:
         abstract = (row.summary or "").strip()
         title = (row.title or "Untitled Paper").strip()
         source_url = row.entry_id
+        fallback_authors = [author.name for author in (row.authors or []) if getattr(author, "name", "")]
+        resolved_authors = fallback_authors
+
+        pdf_url = row.pdf_url or ""
+        used_fulltext = False
+        pdf_bytes: bytes | None = None
+
+        if pdf_url and (content_mode == "fulltext" or author_check_llm is not None):
+            try:
+                pdf_bytes = download_pdf_bytes(pdf_url=pdf_url, timeout_seconds=pdf_timeout_seconds)
+            except Exception:  # noqa: BLE001
+                pdf_bytes = None
+
+        if author_check_llm is not None and pdf_bytes is not None:
+            try:
+                resolved_authors = extract_authors_from_first_page(
+                    pdf_bytes=pdf_bytes,
+                    fallback_authors=fallback_authors,
+                    author_check_llm=author_check_llm,
+                )
+            except Exception:  # noqa: BLE001
+                resolved_authors = fallback_authors
+
         base_metadata = {
             "title": title,
             "paper_id": paper_id_from_source_url(source_url),
             "source_url": source_url,
-            "published": row.published.isoformat() if row.published else "",
-            "categories": list(row.categories or []),
-            "authors": [author.name for author in (row.authors or []) if getattr(author, "name", "")],
+            "authors": resolved_authors,
         }
 
-        pdf_url = row.pdf_url or ""
-        used_fulltext = False
-
-        if content_mode == "fulltext" and pdf_url:
+        if content_mode == "fulltext" and pdf_bytes is not None:
             try:
-                pdf_bytes = download_pdf_bytes(pdf_url=pdf_url, timeout_seconds=pdf_timeout_seconds)
                 extracted_text = extract_pdf_text_with_pymupdf4llm_from_bytes(
                     pdf_bytes=pdf_bytes,
                     max_pages=max_pdf_pages,
@@ -582,7 +736,6 @@ def build_documents(
                     max_chars=max_chunk_chars,
                     chunk_overlap_chars=chunk_overlap_chars,
                     exclude_references=exclude_references,
-                    default_page_end=max_pdf_pages,
                 )
             except Exception:  # noqa: BLE001
                 sections = []
@@ -590,37 +743,11 @@ def build_documents(
             if sections:
                 used_fulltext = True
                 fulltext_success_count += 1
-                for section in sections:
-                    docs.append(
-                        Document(
-                            page_content=str(section["chunk_text"]),
-                            metadata={
-                                **base_metadata,
-                                "content_source": "pdf_fulltext_pymupdf4llm",
-                                "extractor": "pymupdf4llm",
-                                "section_title": str(section["section_title"]),
-                                "section_index": int(section["section_index"]),
-                                "page_start": int(section["page_start"]),
-                                "page_end": int(section["page_end"]),
-                            },
-                        )
-                    )
+                docs.extend(build_section_documents(base_metadata=base_metadata, sections=sections))
 
         if not used_fulltext and abstract:
             abstract_fallback_count += 1
-            docs.append(
-                Document(
-                    page_content=abstract,
-                    metadata={
-                        **base_metadata,
-                        "content_source": "abstract",
-                        "section_title": "abstract",
-                        "section_index": 0,
-                        "page_start": 1,
-                        "page_end": 1,
-                    },
-                )
-            )
+            docs.append(build_abstract_document(base_metadata=base_metadata, abstract=abstract))
 
     if content_mode == "fulltext":
         print(
@@ -639,6 +766,9 @@ def ingest(
     query: str,
     sort_by: str,
     sort_order: str,
+    arxiv_request_delay_seconds: float,
+    arxiv_429_max_retries: int,
+    arxiv_429_backoff_seconds: int,
     content_mode: str,
     max_pdf_pages: int | None,
     pdf_timeout_seconds: int,
@@ -646,6 +776,7 @@ def ingest(
     max_chunk_chars: int,
     chunk_overlap_chars: int,
     exclude_references: bool,
+    llm_author_check_first_page: bool,
     local_pdf: str,
 ) -> None:
     load_dotenv()
@@ -658,6 +789,12 @@ def ingest(
         raise ValueError("chunk_overlap_chars must be 0 or greater.")
     if chunk_overlap_chars >= max_chunk_chars:
         raise ValueError("chunk_overlap_chars must be smaller than max_chunk_chars.")
+    if arxiv_request_delay_seconds <= 0:
+        raise ValueError("arxiv_request_delay_seconds must be greater than 0.")
+    if arxiv_429_max_retries < 0:
+        raise ValueError("arxiv_429_max_retries must be 0 or greater.")
+    if arxiv_429_backoff_seconds <= 0:
+        raise ValueError("arxiv_429_backoff_seconds must be greater than 0.")
 
     qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
     collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
@@ -674,10 +811,19 @@ def ingest(
             max_chunk_chars=max_chunk_chars,
             chunk_overlap_chars=chunk_overlap_chars,
             exclude_references=exclude_references,
+            llm_author_check_first_page=llm_author_check_first_page,
         )
     else:
         print(f"Querying arXiv API with query='{query}', limit={limit}, sort_by={sort_by}, sort_order={sort_order}")
-        dataset = fetch_arxiv_results(query=query, limit=limit, sort_by=sort_by, sort_order=sort_order)
+        dataset = fetch_arxiv_results(
+            query=query,
+            limit=limit,
+            sort_by=sort_by,
+            sort_order=sort_order,
+            request_delay_seconds=arxiv_request_delay_seconds,
+            http_429_max_retries=arxiv_429_max_retries,
+            http_429_backoff_seconds=arxiv_429_backoff_seconds,
+        )
         documents = build_documents(
             dataset,
             content_mode=content_mode,
@@ -687,6 +833,7 @@ def ingest(
             max_chunk_chars=max_chunk_chars,
             chunk_overlap_chars=chunk_overlap_chars,
             exclude_references=exclude_references,
+            llm_author_check_first_page=llm_author_check_first_page,
         )
 
     if not documents:
@@ -696,8 +843,7 @@ def ingest(
         f"Built {len(documents)} chunks (content_mode={content_mode}, "
         f"max_pdf_pages={'all' if max_pdf_pages is None else max_pdf_pages}, "
         f"min_chunk_chars={min_chunk_chars}, max_chunk_chars={max_chunk_chars}, "
-        f"chunk_overlap_chars={chunk_overlap_chars}, "
-        "extractor=pymupdf4llm)."
+        f"chunk_overlap_chars={chunk_overlap_chars})."
     )
 
     embeddings = OpenAIEmbeddings(model=embedding_model, **openai_client_kwargs())
@@ -713,83 +859,128 @@ def ingest(
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Text-based arXiv ingestion with pymupdf4llm section chunking.")
-    parser.add_argument("--limit", type=int, default=100, help="Number of papers to ingest")
-    parser.add_argument(
+    parser = argparse.ArgumentParser(
+        description="Ingest arXiv papers into Qdrant with section-aware chunking.",
+        epilog=(
+            "Typical usage only needs --limit and --query. "
+            "All other options are optional tuning knobs with defaults."
+        ),
+    )
+
+    common = parser.add_argument_group("Common options")
+    common.add_argument("--limit", type=int, default=100, help="Number of papers to ingest")
+    common.add_argument(
         "--query",
         type=str,
         default=os.getenv("ARXIV_QUERY", "cat:cs.AI OR cat:cs.LG"),
         help="arXiv API search query",
     )
-    parser.add_argument(
+    common.add_argument(
         "--sort-by",
         type=str,
         default=os.getenv("ARXIV_SORT_BY", "SubmittedDate"),
         choices=["Relevance", "LastUpdatedDate", "SubmittedDate"],
         help="Sort criterion for arXiv API results",
     )
-    parser.add_argument(
+    common.add_argument(
         "--sort-order",
         type=str,
         default=os.getenv("ARXIV_SORT_ORDER", "Descending"),
         choices=["Ascending", "Descending"],
         help="Sort order for arXiv API results",
     )
-    parser.add_argument(
+
+    arxiv_controls = parser.add_argument_group("arXiv request controls (optional)")
+    arxiv_controls.add_argument(
+        "--arxiv-request-delay-seconds",
+        type=float,
+        default=float_env_default("ARXIV_REQUEST_DELAY_SECONDS", 6.0),
+        help="Delay between arXiv API page requests in seconds",
+    )
+    arxiv_controls.add_argument(
+        "--arxiv-429-max-retries",
+        type=int,
+        default=int_env_default("ARXIV_429_MAX_RETRIES", 6),
+        help="Maximum retries when arXiv responds with HTTP 429",
+    )
+    arxiv_controls.add_argument(
+        "--arxiv-429-backoff-seconds",
+        type=int,
+        default=int_env_default("ARXIV_429_BACKOFF_SECONDS", 20),
+        help="Base backoff seconds for HTTP 429 retries (exponential)",
+    )
+
+    content = parser.add_argument_group("Content and chunking (optional)")
+    content.add_argument(
         "--content-mode",
         type=str,
         default=os.getenv("ARXIV_CONTENT_MODE", "fulltext"),
         choices=["abstract", "fulltext"],
         help="Ingest abstracts only or extract full text from PDFs",
     )
-    parser.add_argument(
+    content.add_argument(
         "--max-pdf-pages",
         type=str,
         default=os.getenv("ARXIV_MAX_PDF_PAGES", "all"),
         help="Maximum number of PDF pages to parse in fulltext mode (default: all)",
     )
-    parser.add_argument(
+    content.add_argument(
         "--pdf-timeout-seconds",
         type=int,
-        default=int(os.getenv("ARXIV_PDF_TIMEOUT_SECONDS", "30")),
+        default=int_env_default("ARXIV_PDF_TIMEOUT_SECONDS", 30),
         help="HTTP timeout for PDF download requests",
     )
-    parser.add_argument(
-        "--local-pdf",
-        type=str,
-        default=os.getenv("ARXIV_LOCAL_PDF", ""),
-        help="Optional local PDF path for single-file testing (skips arXiv API)",
-    )
-    parser.add_argument(
+    content.add_argument(
         "--min-chunk-chars",
         type=int,
-        default=int(os.getenv("ARXIV_MIN_CHUNK_CHARS", "80")),
+        default=int_env_default("ARXIV_MIN_CHUNK_CHARS", 80),
         help="Minimum characters required for a chunk",
     )
-    parser.add_argument(
+    content.add_argument(
         "--max-chunk-chars",
         type=int,
-        default=int(os.getenv("ARXIV_MAX_CHUNK_CHARS", "1200")),
+        default=int_env_default("ARXIV_MAX_CHUNK_CHARS", 2500),
         help="Maximum characters before splitting a chunk",
     )
-    parser.add_argument(
+    content.add_argument(
         "--chunk-overlap-chars",
         type=int,
-        default=int(os.getenv("ARXIV_CHUNK_OVERLAP_CHARS", "180")),
+        default=int_env_default("ARXIV_CHUNK_OVERLAP_CHARS", 500),
         help="Number of trailing characters repeated at the start of the next chunk",
     )
-    parser.add_argument(
+    content.add_argument(
         "--exclude-references",
         action="store_true",
         default=bool_env("ARXIV_EXCLUDE_REFERENCES", True),
         help="Skip sections titled references or bibliography",
     )
-    parser.add_argument(
+    content.add_argument(
         "--keep-references",
         dest="exclude_references",
         action="store_false",
         help="Do not skip references/bibliography sections",
     )
+    content.add_argument(
+        "--llm-author-check-first-page",
+        action="store_true",
+        default=bool_env("ARXIV_LLM_AUTHOR_CHECK_FIRST_PAGE", False),
+        help="Use LLM on first PDF page to infer authors and store them in metadata",
+    )
+    content.add_argument(
+        "--no-llm-author-check-first-page",
+        dest="llm_author_check_first_page",
+        action="store_false",
+        help="Disable first-page LLM author extraction",
+    )
+
+    debug = parser.add_argument_group("Local/debug option (optional)")
+    debug.add_argument(
+        "--local-pdf",
+        type=str,
+        default=os.getenv("ARXIV_LOCAL_PDF", ""),
+        help="Optional local PDF path for single-file testing (skips arXiv API)",
+    )
+
     parsed = parser.parse_args()
     try:
         parsed.max_pdf_pages = parse_max_pdf_pages(parsed.max_pdf_pages)
@@ -805,6 +996,9 @@ if __name__ == "__main__":
         query=args.query,
         sort_by=args.sort_by,
         sort_order=args.sort_order,
+        arxiv_request_delay_seconds=args.arxiv_request_delay_seconds,
+        arxiv_429_max_retries=args.arxiv_429_max_retries,
+        arxiv_429_backoff_seconds=args.arxiv_429_backoff_seconds,
         content_mode=args.content_mode,
         max_pdf_pages=args.max_pdf_pages,
         pdf_timeout_seconds=args.pdf_timeout_seconds,
@@ -812,5 +1006,6 @@ if __name__ == "__main__":
         max_chunk_chars=args.max_chunk_chars,
         chunk_overlap_chars=args.chunk_overlap_chars,
         exclude_references=args.exclude_references,
+        llm_author_check_first_page=args.llm_author_check_first_page,
         local_pdf=args.local_pdf,
     )
