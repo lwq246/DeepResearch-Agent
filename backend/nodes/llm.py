@@ -1,4 +1,3 @@
-import re
 from typing import Any
 
 try:
@@ -34,29 +33,9 @@ except ImportError:
     from nodes.shared import summarize_documents_for_prompt
     from nodes.shared import temporal_window_label
 
-
-AUTHOR_QUERY_PATTERNS = (
-    re.compile(r"\bwritten by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
-    re.compile(r"\bauthored by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
-    re.compile(r"\bpapers?\s+by(?:\s+author)?\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
-    re.compile(r"\bby\s+author\s+(?P<author>[^\n\r\?\.,;:]+)", flags=re.I),
-)
-
-
-def regex_extract_author_constraint(question: str) -> str | None:
-    for pattern in AUTHOR_QUERY_PATTERNS:
-        match = pattern.search(question)
-        if not match:
-            continue
-        candidate = normalize_author_name(match.group("author"))
-        if len(candidate) >= 3:
-            return candidate
-    return None
-
-
 def llm_extract_author_constraint(question: str) -> str | None:
     if not bool_env("LLM_AUTHOR_QUERY_ENABLED", True):
-        return regex_extract_author_constraint(question)
+        return None
 
     parsed = llm_json_response(
         llm=get_planner_llm(),
@@ -65,14 +44,14 @@ def llm_extract_author_constraint(question: str) -> str | None:
     )
 
     if not parsed:
-        return regex_extract_author_constraint(question)
+        return None
 
     is_author_query = coerce_bool(parsed.get("is_author_query", False), default=False)
     candidate = normalize_author_name(str(parsed.get("author", "")))
     if is_author_query and len(candidate) >= 3:
         return candidate
 
-    return regex_extract_author_constraint(question)
+    return None
 
 
 def llm_plan_action(

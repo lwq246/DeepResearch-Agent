@@ -238,29 +238,15 @@ def is_running_header_or_footer_line(line: str) -> bool:
 def cleanup_extracted_text_artifacts(extracted_text: str) -> str:
     lines = extracted_text.splitlines()
     cleaned: list[str] = []
-    in_picture_block = False
+
 
     for line in lines:
-        lowered = line.lower()
-
-        if "start of picture text" in lowered:
-            in_picture_block = True
-            continue
-        if "end of picture text" in lowered:
-            in_picture_block = False
-            continue
-        if in_picture_block:
-            continue
-
-        if "intentionally omitted" in lowered:
-            continue
         if is_running_header_or_footer_line(line):
             continue
 
         cleaned.append(line)
 
     return "\n".join(cleaned).strip()
-
 
 def truncate_text_at_references(extracted_text: str) -> str:
     lines = extracted_text.splitlines()
