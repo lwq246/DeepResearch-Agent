@@ -1,0 +1,7 @@
+.venv
+pycache
+.pytest_cache
+.mypy_cache
+*.pyc
+logs
+.logfire

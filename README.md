@@ -2,20 +2,21 @@
 
 DeepResearch RAG Agent is a full-stack Retrieval-Augmented Generation (RAG) application that combines:
 
-- Local paper retrieval from Qdrant
+- Local paper retrieval from Qdrant for high-relevance domain context
 - Fallback web search for freshness and missing evidence
-- A LangGraph ReAct-style workflow for controlled routing
-- FastAPI backend and Next.js frontend
+- A LangGraph ReAct-style workflow for controlled routing and retry decisions
+- FastAPI backend and Next.js frontend for end-to-end interaction
 
-The system is designed to answer with evidence-backed citations and graceful fallback behavior when confidence is low.
+The system is designed for evidence-first answers: every response is grounded in retrieved context, citations are preserved through generation, and fallback behavior is explicit when local evidence is weak or incomplete.
 
 ## Core Capabilities
 
 - Agentic routing with explicit nodes (`react_plan`, `retrieve`, `web_search`, `validate_evidence`, `build_context`, `generate`)
+- Hybrid evidence strategy: local-first retrieval with controlled web fallback when evidence is insufficient
 - Prompt-driven web-only intent detection (`requires_web`) in planner and reflection steps
-- Temporal query handling for phrases like "last month" and "this month"
-- Section-aware ingestion for full-text PDFs
-- Debug endpoints with trace-level graph visibility
+- Section-aware full-text PDF ingestion with chunking and overlap controls
+- Upload pipeline that extracts PDF text, derives metadata, and indexes section-level chunks in Qdrant
+- Benchmark harness (`run_question_tests.py`) with LLM-based answer judging and report generation
 - Logfire instrumentation for API, node-level, Pydantic, and OpenAI telemetry
 
 ## Architecture
@@ -54,16 +55,26 @@ flowchart TD
 ```text
 .
 ├── backend/
-│   ├── main.py            # FastAPI API endpoints
-│   ├── graph.py           # LangGraph state machine wiring
-│   ├── nodes.py           # Agent nodes and routing logic
-│   ├── configuration.py   # Model, token, env config helpers
-│   ├── ingest.py          # PDF ingestion CLI
+│   ├── main.py                    # FastAPI API endpoints
+│   ├── graph.py                   # LangGraph state machine wiring
+│   ├── graph_utils.py             # Shared graph helpers (trace/metadata/score utils)
+│   ├── configuration.py           # Model, token, and env config helpers
+│   ├── prompts.py                 # System prompts for planner/rewrite/reflection/answer
+│   ├── state.py                   # Graph state schema
+│   ├── search.py                  # Retrieval/search utilities
+│   ├── run_question_tests.py      # QA benchmark runner with LLM judging
+│   ├── ingest/                    # Ingestion package (CLI, chunking, PDF/document pipeline)
+│   ├── nodes/                     # Agent nodes and routing logic
+│   ├── models/                    # API and graph response models
+│   ├── tools/                     # Qdrant/PDF helper scripts
+│   ├── logs/                      # Evaluation/debug output artifacts
 │   └── requirements.txt
-├── frontend/              # Next.js app
-├── docker-compose.yml     # Qdrant service
-├── run-dev.ps1            # One-command local startup
-└── run-dev.cmd            # Windows launcher
+├── frontend/                      # Next.js app (app router + chat UI)
+│   ├── app/
+│   ├── components/
+│   └── package.json
+├── docker-compose.yml             # Qdrant service
+└── README.md
 ```
 
 ## Prerequisites
