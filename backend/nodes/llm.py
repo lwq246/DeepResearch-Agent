@@ -90,15 +90,34 @@ def llm_plan_action(
     return action, thought, requires_web_value
 
 
-def llm_rewrite_web_query(question: str, default_query: str) -> str:
+def llm_rewrite_web_query(
+    question: str,
+    default_query: str,
+    attempt_index: int = 0,
+    previous_query: str = "",
+) -> str:
     if not bool_env("LLM_QUERY_REWRITE_ENABLED", True):
-        return default_query
+        if attempt_index <= 0:
+            return default_query
+        if previous_query and previous_query.strip().casefold() != default_query.strip().casefold():
+            return default_query
+        return f"{default_query} official sources"
 
     temporal_target = relative_month_target(question)
     if temporal_target:
         target_hint = temporal_window_label(*temporal_target)
     else:
         target_hint = "none"
+
+    retry_hint = ""
+    if attempt_index > 0:
+        prior = previous_query.strip() or default_query
+        retry_hint = (
+            f"Retry attempt: {attempt_index + 1}. "
+            f"Previous query was: {prior}\n"
+            "Generate a meaningfully different query from the previous one while preserving intent. "
+            "Use complementary keywords, aliases, or source-focused phrasing."
+        )
 
     parsed = llm_json_response(
         llm=get_query_rewrite_llm(),
@@ -108,14 +127,24 @@ def llm_rewrite_web_query(question: str, default_query: str) -> str:
             f"Resolved target window: {target_hint}\n"
             f"User question: {question}\n"
             f"Default rewritten query: {default_query}\n"
+            f"{retry_hint}\n"
             "Prefer concise wording and include freshness hints only when useful."
         ),
     )
     if not parsed:
-        return default_query
+        if attempt_index <= 0:
+            return default_query
+        return f"{default_query} official sources"
 
     query = str(parsed.get("query", "")).strip()
-    return query or default_query
+    candidate = query or default_query
+
+    if attempt_index > 0:
+        prior_norm = previous_query.strip().casefold()
+        if prior_norm and candidate.strip().casefold() == prior_norm:
+            return f"{default_query} official sources"
+
+    return candidate
 
 
 def llm_reflect_evidence(

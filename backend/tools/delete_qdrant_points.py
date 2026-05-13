@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
 
-
+#py tools\delete_qdrant_points.py --title "A dataset of clinically generated visual questions and answers about radiology images.pdf" --apply 
 def build_filter(args: argparse.Namespace) -> models.Filter:
     must: list[models.Condition] = []
 

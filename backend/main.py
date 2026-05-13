@@ -223,56 +223,56 @@ async def chat_debug(request: ChatRequest) -> ChatDebugResponse:
         return response
 
 
-@app.post("/chat/stream-debug", response_model=ChatStreamDebugResponse)
-async def chat_stream_debug(request: ChatRequest) -> ChatStreamDebugResponse:
-    with logfire.span("chat_stream_debug", message=request.message):
-        state = build_initial_state(request.message)
-        visited_nodes: list[str] = []
-        node_updates: list[NodeUpdate] = []
+# @app.post("/chat/stream-debug", response_model=ChatStreamDebugResponse)
+# async def chat_stream_debug(request: ChatRequest) -> ChatStreamDebugResponse:
+#     with logfire.span("chat_stream_debug", message=request.message):
+#         state = build_initial_state(request.message)
+#         visited_nodes: list[str] = []
+#         node_updates: list[NodeUpdate] = []
 
-        for event in lang_graph.stream(state, stream_mode="updates"):
-            if not isinstance(event, dict):
-                continue
-            for node_name, update in event.items():
-                visited_nodes.append(str(node_name))
-                if isinstance(update, dict):
-                    state.update(update)
-                    node_updates.append(
-                        NodeUpdate(
-                            node=str(node_name),
-                            updated_keys=sorted(update.keys()),
-                            summary=summarize_node_update(update),
-                        )
-                    )
-                else:
-                    node_updates.append(
-                        NodeUpdate(
-                            node=str(node_name),
-                            updated_keys=[],
-                            summary={"value": str(update)},
-                        )
-                    )
+#         for event in lang_graph.stream(state, stream_mode="updates"):
+#             if not isinstance(event, dict):
+#                 continue
+#             for node_name, update in event.items():
+#                 visited_nodes.append(str(node_name))
+#                 if isinstance(update, dict):
+#                     state.update(update)
+#                     node_updates.append(
+#                         NodeUpdate(
+#                             node=str(node_name),
+#                             updated_keys=sorted(update.keys()),
+#                             summary=summarize_node_update(update),
+#                         )
+#                     )
+#                 else:
+#                     node_updates.append(
+#                         NodeUpdate(
+#                             node=str(node_name),
+#                             updated_keys=[],
+#                             summary={"value": str(update)},
+#                         )
+#                     )
 
-        response = ChatStreamDebugResponse(
-            answer=str(state.get("generation", "")),
-            sources=state.get("documents", []),
-            trace=state.get("react_trace", []),
-            top_score=float(state.get("top_score", 0.0)),
-            evidence_ok=bool(state.get("evidence_ok", False)),
-            web_attempts=int(state.get("web_attempts", 0)),
-            fallback=bool(state.get("fallback", False)),
-            visited_nodes=visited_nodes,
-            node_updates=node_updates,
-        )
-        logfire.info(
-            "chat_stream_debug_completed",
-            visited_nodes_count=len(visited_nodes),
-            node_updates_count=len(node_updates),
-            evidence_ok=response.evidence_ok,
-            web_attempts=response.web_attempts,
-            fallback=response.fallback,
-        )
-        return response
+#         response = ChatStreamDebugResponse(
+#             answer=str(state.get("generation", "")),
+#             sources=state.get("documents", []),
+#             trace=state.get("react_trace", []),
+#             top_score=float(state.get("top_score", 0.0)),
+#             evidence_ok=bool(state.get("evidence_ok", False)),
+#             web_attempts=int(state.get("web_attempts", 0)),
+#             fallback=bool(state.get("fallback", False)),
+#             visited_nodes=visited_nodes,
+#             node_updates=node_updates,
+#         )
+#         logfire.info(
+#             "chat_stream_debug_completed",
+#             visited_nodes_count=len(visited_nodes),
+#             node_updates_count=len(node_updates),
+#             evidence_ok=response.evidence_ok,
+#             web_attempts=response.web_attempts,
+#             fallback=response.fallback,
+#         )
+#         return response
 
 
 @app.post("/upload-pdf", response_model=UploadPdfResponse)

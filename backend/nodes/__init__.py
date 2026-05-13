@@ -321,7 +321,14 @@ def web_search(state: GraphState) -> dict[str, Any]:
     web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD", 0.65)
     search_tool = get_search_tool()
     default_web_query = question.strip()
-    web_query = llm_rewrite_web_query(question, default_web_query)
+    web_attempts = int(state.get("web_attempts", 0))
+    previous_web_query = str(state.get("last_web_query", "")).strip()
+    web_query = llm_rewrite_web_query(
+        question,
+        default_web_query,
+        attempt_index=web_attempts,
+        previous_query=previous_web_query,
+    )
     results = search_tool.invoke({"query": web_query})
 
     web_documents: list[dict[str, Any]] = []
@@ -346,7 +353,8 @@ def web_search(state: GraphState) -> dict[str, Any]:
     return {
         "documents": existing_documents + scored_web_documents,
         "fallback": False,
-        "web_attempts": int(state.get("web_attempts", 0)) + 1,
+        "web_attempts": web_attempts + 1,
+        "last_web_query": web_query,
         "react_trace": append_trace(
             state,
             (
