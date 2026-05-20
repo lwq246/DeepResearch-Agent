@@ -14,7 +14,7 @@ export default function HomePage() {
             Research Copilot
           </p>
           <h1 className="mt-2 font-display text-3xl leading-tight sm:text-4xl">
-            ArXiv RAG Agent
+            DeepResearch RAG Agent
           </h1>
           <p className="mt-2 max-w-2xl text-sm text-ink/75 sm:text-base">
             Ask machine-learning paper questions. The agent searches your Qdrant
