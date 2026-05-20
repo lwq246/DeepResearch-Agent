@@ -9,6 +9,16 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
 
 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
 def normalize_base_section(title: str) -> str:
     stripped = title.strip()
     stripped = re.sub(r"\s+\(part\s+\d+\)\s*$", "", stripped, flags=re.I)
@@ -158,8 +168,8 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    qdrant_url = args.url or os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection = args.collection or os.getenv("QDRANT_COLLECTION", "arxiv_docs")
+    qdrant_url = args.url or required_env("QDRANT_URL")
+    collection = args.collection or required_env("QDRANT_COLLECTION")
     with_vectors = not args.no_vectors
 
     scroll_filter = build_filter(args)

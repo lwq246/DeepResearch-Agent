@@ -1,46 +1,20 @@
 from typing import Any
 
-try:
-    from ..graph_utils import unwrap_metadata
-    from .shared import build_qdrant_document
-    from .shared import can_take_chunk_for_paper
-    from .shared import document_paper_group_key
-    from .shared import increment_paper_chunk_count
-    from .shared import metadata_authors
-    from .shared import normalize_author_name
-    from .shared import score_web_documents
-except ImportError:
-    from graph_utils import unwrap_metadata
-    from nodes.shared import build_qdrant_document
-    from nodes.shared import can_take_chunk_for_paper
-    from nodes.shared import document_paper_group_key
-    from nodes.shared import increment_paper_chunk_count
-    from nodes.shared import metadata_authors
-    from nodes.shared import normalize_author_name
-    from nodes.shared import score_web_documents
-
-
-def author_matches(metadata: dict[str, Any], requested_author: str) -> bool:
-    requested = normalize_author_name(requested_author).casefold()
-    if not requested:
-        return False
-
-    for candidate in metadata_authors(metadata):
-        normalized = normalize_author_name(candidate).casefold()
-        if not normalized:
-            continue
-        if requested in normalized or normalized in requested:
-            return True
-    return False
+from ..graph_utils import unwrap_metadata
+from qdrant_client.http import models
+from .shared import build_qdrant_document
+from .shared import can_take_chunk_for_paper
+from .shared import document_paper_group_key
+from .shared import increment_paper_chunk_count
+from .shared import score_web_documents
 
 
 def retrieve_documents_by_author(
     vector_store: Any,
     question: str,
     requested_author: str,
-    max_scan_points: int,
     max_author_candidates: int,
-    max_context_chunks: int,
+    max_context_docs: int,
     max_chunks_per_paper: int,
     max_unique_papers: int,
 ) -> list[dict[str, Any]]:
@@ -51,23 +25,32 @@ def retrieve_documents_by_author(
 
     author_candidates: list[dict[str, Any]] = []
     offset = None
-    scanned_points = 0
-    batch_size = min(256, max(1, max_scan_points))
+    batch_size = 256
     reached_candidate_limit = False
+    author_filter = models.Filter(
+        should=[
+            models.FieldCondition(
+                key="metadata.authors",
+                match=models.MatchValue(value=requested_author),
+            ),
+            models.FieldCondition(
+                key="metadata.authors",
+                match=models.MatchText(text=requested_author),
+            ),
+        ]
+    )
 
-    while scanned_points < max_scan_points:
-        limit = min(batch_size, max_scan_points - scanned_points)
+    while True:
         points, next_offset = client.scroll(
             collection_name=collection_name,
-            limit=limit,
+            scroll_filter=author_filter,
+            limit=batch_size,
             with_payload=True,
             with_vectors=False,
             offset=offset,
         )
         if not points:
             break
-
-        scanned_points += len(points)
 
         for point in points:
             payload = getattr(point, "payload", None)
@@ -79,9 +62,6 @@ def retrieve_documents_by_author(
                 continue
 
             metadata = unwrap_metadata(raw_metadata)
-            if not author_matches(metadata, requested_author):
-                continue
-
             author_candidates.append(
                 build_qdrant_document(
                     metadata=metadata,
@@ -123,7 +103,7 @@ def retrieve_documents_by_author(
         documents.append(candidate)
         increment_paper_chunk_count(paper_chunk_counts=paper_chunk_counts, paper_key=paper_key)
 
-        if len(documents) >= max_context_chunks:
+        if len(documents) >= max_context_docs:
             break
 
     return documents

@@ -4,64 +4,34 @@ from typing import Any, Literal
 
 import logfire
 
-try:
-    from ..configuration import bool_env
-    from ..configuration import float_env
-    from ..configuration import get_llm
-    from ..configuration import get_search_tool
-    from ..configuration import get_vector_store
-    from ..configuration import int_env
-    from ..graph_utils import append_trace
-    from ..graph_utils import safe_float
-    from ..graph_utils import unwrap_metadata
-    from .author_retrieval import retrieve_documents_by_author
-    from .llm import llm_extract_author_constraint
-    from .llm import llm_plan_action
-    from .llm import llm_reflect_evidence
-    from .llm import llm_rewrite_web_query
-    from .shared import build_qdrant_document
-    from .shared import can_take_chunk_for_paper
-    from .shared import coerce_bool
-    from .shared import current_date_iso
-    from .shared import document_dedup_key
-    from .shared import document_mentions_target_month
-    from .shared import increment_paper_chunk_count
-    from .shared import metadata_paper_group_key
-    from .shared import relative_month_target
-    from .shared import resolve_requires_web
-    from .shared import score_web_documents
-    from .shared import temporal_window_label
-    from ..prompts import ANSWER_SYSTEM_PROMPT
-    from ..state import GraphState
-except ImportError:
-    from configuration import bool_env
-    from configuration import float_env
-    from configuration import get_llm
-    from configuration import get_search_tool
-    from configuration import get_vector_store
-    from configuration import int_env
-    from graph_utils import append_trace
-    from graph_utils import safe_float
-    from graph_utils import unwrap_metadata
-    from nodes.author_retrieval import retrieve_documents_by_author
-    from nodes.llm import llm_extract_author_constraint
-    from nodes.llm import llm_plan_action
-    from nodes.llm import llm_reflect_evidence
-    from nodes.llm import llm_rewrite_web_query
-    from nodes.shared import build_qdrant_document
-    from nodes.shared import can_take_chunk_for_paper
-    from nodes.shared import coerce_bool
-    from nodes.shared import current_date_iso
-    from nodes.shared import document_dedup_key
-    from nodes.shared import document_mentions_target_month
-    from nodes.shared import increment_paper_chunk_count
-    from nodes.shared import metadata_paper_group_key
-    from nodes.shared import relative_month_target
-    from nodes.shared import resolve_requires_web
-    from nodes.shared import score_web_documents
-    from nodes.shared import temporal_window_label
-    from prompts import ANSWER_SYSTEM_PROMPT
-    from state import GraphState
+
+from ..configuration import bool_env
+from ..configuration import float_env
+from ..configuration import get_llm
+from ..configuration import get_search_tool
+from ..configuration import get_vector_store
+from ..configuration import int_env
+from ..graph_utils import append_trace
+from ..graph_utils import safe_float
+from ..graph_utils import unwrap_metadata
+from ..retrieval_config import RETRIEVAL_CONFIG
+from .author_retrieval import retrieve_documents_by_author
+from .llm import llm_extract_author_constraint
+from .llm import llm_plan_action
+from .llm import llm_reflect_evidence
+from .llm import llm_rewrite_web_query
+from .shared import build_qdrant_document
+from .shared import can_take_chunk_for_paper
+from .shared import coerce_bool
+from .shared import current_date_iso
+from .shared import document_dedup_key
+from .shared import increment_paper_chunk_count
+from .shared import metadata_paper_group_key
+from .shared import resolve_requires_web
+from .shared import score_web_documents
+from ..prompts import ANSWER_SYSTEM_PROMPT
+from ..state import GraphState
+
 
 
 def traced_node(node_name: str):
@@ -148,13 +118,13 @@ def react_plan(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
     step = int(state.get("react_step", 0)) + 1
-    max_steps = int_env("REACT_MAX_STEPS", 4)
+    max_steps = int_env("REACT_MAX_STEPS")
     web_attempts = int(state.get("web_attempts", 0))
-    max_web_attempts = int_env("MAX_WEB_ATTEMPTS", 2)
+    max_web_attempts = int_env("MAX_WEB_ATTEMPTS")
 
     has_local_docs = any(str(doc.get("origin", "")) == "qdrant" for doc in documents)
     has_web_docs = any(str(doc.get("origin", "")) == "web" for doc in documents)
-    force_web_fallback = bool_env("FORCE_WEB_FALLBACK", False)
+    force_web_fallback = bool_env("FORCE_WEB_FALLBACK")
     requires_web = resolve_requires_web(state, question)
 
     action, thought = pick_react_action(
@@ -203,14 +173,14 @@ def route_react_action(state: GraphState) -> Literal["retrieve", "web_search", "
 def retrieve(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     vector_store = get_vector_store()
-    max_qdrant_candidates = int_env("MAX_QDRANT_CANDIDATES", 40)
-    max_author_scan_points = int_env("MAX_AUTHOR_SCAN_POINTS", 6000)
-    max_author_candidates = int_env("MAX_AUTHOR_CANDIDATES", 200)
-    max_context_chunks = int_env("MAX_CONTEXT_CHUNKS", 5)
-    max_chunks_per_paper = int_env("MAX_CHUNKS_PER_PAPER", 3)
-    max_unique_papers = int_env("MAX_UNIQUE_PAPERS", 4)
-    relevance_threshold = float_env("RELEVANCE_THRESHOLD", 0.65)
-    force_web_fallback = bool_env("FORCE_WEB_FALLBACK", False)
+    max_qdrant_candidates = int_env("MAX_QDRANT_CANDIDATES")
+    max_author_candidates = RETRIEVAL_CONFIG.max_author_candidates
+    max_context_docs = RETRIEVAL_CONFIG.max_context_docs
+    max_chunks_per_paper = RETRIEVAL_CONFIG.max_chunks_per_paper
+    max_chunks_per_paper_author_query = RETRIEVAL_CONFIG.max_chunks_per_paper_author_query
+    max_unique_papers = RETRIEVAL_CONFIG.max_unique_papers
+    relevance_threshold = float_env("RELEVANCE_THRESHOLD")
+    force_web_fallback = bool_env("FORCE_WEB_FALLBACK")
 
     requested_author = llm_extract_author_constraint(question)
     if requested_author:
@@ -218,10 +188,9 @@ def retrieve(state: GraphState) -> dict[str, Any]:
             vector_store=vector_store,
             question=question,
             requested_author=requested_author,
-            max_scan_points=max_author_scan_points,
             max_author_candidates=max_author_candidates,
-            max_context_chunks=max_context_chunks,
-            max_chunks_per_paper=max_chunks_per_paper,
+            max_context_docs=max_context_docs,
+            max_chunks_per_paper=max_chunks_per_paper_author_query,
             max_unique_papers=max_unique_papers,
         )
         if not author_documents:
@@ -236,7 +205,7 @@ def retrieve(state: GraphState) -> dict[str, Any]:
                     state,
                     (
                         f"retrieve: author='{requested_author}' matched=0 "
-                        f"scan_limit={max_author_scan_points}; fallback requested"
+                        f"candidate_limit={max_author_candidates}; fallback requested"
                     ),
                 ),
             }
@@ -253,8 +222,7 @@ def retrieve(state: GraphState) -> dict[str, Any]:
                 state,
                 (
                     f"retrieve: author='{requested_author}' matched={len(author_documents)} "
-                    f"scan_limit={max_author_scan_points} candidate_limit={max_author_candidates} "
-                    f"top_score={top_author_score:.3f}"
+                    f"candidate_limit={max_author_candidates} top_score={top_author_score:.3f}"
                 ),
             ),
         }
@@ -294,7 +262,7 @@ def retrieve(state: GraphState) -> dict[str, Any]:
         )
         increment_paper_chunk_count(paper_chunk_counts=paper_chunk_counts, paper_key=paper_key)
 
-        if len(documents) >= max_context_chunks:
+        if len(documents) >= max_context_docs:
             break
 
     return {
@@ -317,8 +285,8 @@ def retrieve(state: GraphState) -> dict[str, Any]:
 def web_search(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     existing_documents = state.get("documents", [])
-    max_web_results = int_env("MAX_WEB_RESULTS", 5)
-    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD", 0.65)
+    max_web_results = int_env("MAX_WEB_RESULTS")
+    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD")
     search_tool = get_search_tool()
     default_web_query = question.strip()
     web_attempts = int(state.get("web_attempts", 0))
@@ -370,15 +338,14 @@ def web_search(state: GraphState) -> dict[str, Any]:
 def validate_evidence(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
-    temporal_target = relative_month_target(question)
     requires_web = resolve_requires_web(state, question)
     requested_author = str(state.get("author_constraint", "")).strip()
 
-    min_local_docs = int_env("MIN_LOCAL_DOCS", 2)
-    min_web_docs = int_env("MIN_WEB_DOCS", 2)
-    min_web_content_chars = int_env("MIN_WEB_CONTENT_CHARS", 200)
-    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD", 0.45)
-    max_web_attempts = int_env("MAX_WEB_ATTEMPTS", 2)
+    min_local_docs = int_env("MIN_LOCAL_DOCS")
+    min_web_docs = int_env("MIN_WEB_DOCS")
+    min_web_content_chars = int_env("MIN_WEB_CONTENT_CHARS")
+    web_relevance_threshold = float_env("WEB_RELEVANCE_THRESHOLD")
+    max_web_attempts = int_env("MAX_WEB_ATTEMPTS")
     web_attempts = int(state.get("web_attempts", 0))
 
     local_docs = [doc for doc in documents if str(doc.get("origin", "")) == "qdrant"]
@@ -392,20 +359,7 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
         and safe_float(doc.get("score", 0.0)) >= web_relevance_threshold
     ]
     top_web_score = max((safe_float(doc.get("score", 0.0)) for doc in web_docs), default=0.0)
-
-    temporal_matched_web_docs = web_rich_docs
-    temporal_label = "-"
-    if temporal_target:
-        temporal_label = temporal_window_label(*temporal_target)
-        temporal_matched_web_docs = [
-            doc for doc in web_rich_docs if document_mentions_target_month(doc, *temporal_target)
-        ]
-
-    min_temporal_matched_web_docs = int_env("MIN_TEMPORAL_MATCHED_WEB_DOCS", 1)
-    temporal_ok = (temporal_target is None) or (
-        len(temporal_matched_web_docs) >= min_temporal_matched_web_docs
-    )
-    web_ok = len(web_rich_docs) >= min_web_docs and temporal_ok
+    web_ok = len(web_rich_docs) >= min_web_docs
 
     if requires_web:
         evidence_ok = web_ok
@@ -444,7 +398,6 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
                 f"local_ok={local_ok} web_ok={web_ok} evidence_ok={evidence_ok} "
                 f"top_web_score={top_web_score:.3f} web_threshold={web_relevance_threshold:.3f} "
                 f"needs_more_web={needs_more_web} requires_web={requires_web} "
-                f"temporal_target={temporal_label} temporal_matches={len(temporal_matched_web_docs)} "
                 f"author_target={requested_author or '-'} "
                 f"missing_topics={';'.join(missing_topics) if missing_topics else '-'} "
                 f"reflection_reason={reflection_reason or '-'}"
@@ -468,7 +421,7 @@ def build_context(state: GraphState) -> dict[str, Any]:
             "react_trace": append_trace(state, "build_context: no documents available"),
         }
 
-    max_final_context_docs = int_env("MAX_FINAL_CONTEXT_DOCS", 5)
+    max_context_docs = RETRIEVAL_CONFIG.max_context_docs
     requires_web = resolve_requires_web(state, str(state.get("question", "")))
     prefer_web_first = requires_web
 
@@ -515,9 +468,9 @@ def build_context(state: GraphState) -> dict[str, Any]:
             )[:3]
             final_documents = top_web_documents + top_qdrant_documents
         else:
-            final_documents = unique_documents[:max_final_context_docs]
+            final_documents = unique_documents[:max_context_docs]
     else:
-        final_documents = unique_documents[:max_final_context_docs]
+        final_documents = unique_documents[:max_context_docs]
 
     return {
         "documents": final_documents,
@@ -536,17 +489,16 @@ def build_context(state: GraphState) -> dict[str, Any]:
 def generate(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
-    max_prompt_docs = int_env("MAX_PROMPT_DOCS", 6)
-    prompt_documents = documents[:max_prompt_docs]
+    max_context_docs = RETRIEVAL_CONFIG.max_context_docs
+    prompt_documents = documents[:max_context_docs]
 
-    temporal_target = relative_month_target(question)
     requires_web = resolve_requires_web(state, question)
     if requires_web:
         web_documents = [
             doc for doc in prompt_documents if str(doc.get("origin", "")) == "web"
         ]
         if web_documents:
-            prompt_documents = web_documents[:max_prompt_docs]
+            prompt_documents = web_documents[:max_context_docs]
         else:
             return {
                 "generation": (
@@ -561,25 +513,6 @@ def generate(state: GraphState) -> dict[str, Any]:
             }
 
     temporal_hint = "none"
-    if temporal_target:
-        temporal_hint = temporal_window_label(*temporal_target)
-        temporal_documents = [
-            doc for doc in prompt_documents if document_mentions_target_month(doc, *temporal_target)
-        ]
-        if temporal_documents:
-            prompt_documents = temporal_documents[:max_prompt_docs]
-        elif requires_web:
-            return {
-                "generation": (
-                    f"I could not find enough evidence specifically for {temporal_hint}. "
-                    "Please retry with additional keywords or provide sources for that exact time window."
-                ),
-                "documents": [],
-                "react_trace": append_trace(
-                    state,
-                    f"generate_guard: no temporal evidence matched target={temporal_hint}",
-                ),
-            }
 
     context = "\n\n".join(
         [

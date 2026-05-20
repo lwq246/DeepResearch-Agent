@@ -5,6 +5,16 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
 
 #py tools\delete_qdrant_points.py --title "A dataset of clinically generated visual questions and answers about radiology images.pdf" --apply 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
 def build_filter(args: argparse.Namespace) -> models.Filter:
     must: list[models.Condition] = []
 
@@ -108,8 +118,8 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    qdrant_url = args.url or os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection = args.collection or os.getenv("QDRANT_COLLECTION", "arxiv_docs")
+    qdrant_url = args.url or required_env("QDRANT_URL")
+    collection = args.collection or required_env("QDRANT_COLLECTION")
 
     client = QdrantClient(url=qdrant_url)
     query_filter = build_filter(args)

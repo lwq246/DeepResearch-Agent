@@ -1,17 +1,12 @@
 import json
 import re
-from datetime import date, timedelta
+from datetime import date
 from math import sqrt
 from typing import Any, Sequence
 
-try:
-    from ..configuration import bool_env
-    from ..configuration import get_embeddings
-    from ..graph_utils import safe_float
-except ImportError:
-    from configuration import bool_env
-    from configuration import get_embeddings
-    from graph_utils import safe_float
+from ..configuration import bool_env
+from ..configuration import get_embeddings
+from ..graph_utils import safe_float
 
 
 def parse_json_object(raw_text: str) -> dict[str, Any] | None:
@@ -78,29 +73,11 @@ def current_date_iso() -> str:
     return date.today().isoformat()
 
 
-def relative_month_target(question: str) -> tuple[int, int] | None:
-    q = question.lower()
-    today = date.today()
-    if "last month" in q:
-        last_day_previous_month = date(today.year, today.month, 1) - timedelta(days=1)
-        return last_day_previous_month.year, last_day_previous_month.month
-    if "this month" in q:
-        return today.year, today.month
-    return None
-
-
-def resolve_requires_web(state: Any, question: str) -> bool:
+def resolve_requires_web(state: Any, _question: str) -> bool:
     return (
-        bool_env("FORCE_WEB_FALLBACK", False)
+        bool_env("FORCE_WEB_FALLBACK")
         or bool(state.get("requires_web", False))
-        or (relative_month_target(question) is not None)
     )
-
-
-def normalize_author_name(value: str) -> str:
-    normalized = re.sub(r"\s+", " ", value.strip().strip("\"'"))
-    normalized = re.sub(r"^(?:an?\s+)?author\s+", "", normalized, flags=re.I)
-    return normalized.strip(" .,:;!?")
 
 
 def metadata_authors(metadata: dict[str, Any]) -> list[str]:

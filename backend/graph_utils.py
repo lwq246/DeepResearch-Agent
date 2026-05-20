@@ -1,9 +1,6 @@
 from typing import Any
 
-try:
-    from .state import GraphState
-except ImportError:
-    from state import GraphState
+from .state import GraphState
 
 
 def append_trace(state: GraphState, message: str) -> list[str]:

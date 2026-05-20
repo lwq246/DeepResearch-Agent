@@ -6,7 +6,8 @@ from langchain_qdrant import QdrantVectorStore
 
 from .documents import build_documents
 from .documents import build_documents_from_local_pdf
-from .env import openai_client_kwargs
+from backend.configuration import openai_client_kwargs
+from backend.configuration import required_env
 from .sources import fetch_arxiv_results
 
 
@@ -45,9 +46,9 @@ def ingest(
     if arxiv_429_backoff_seconds <= 0:
         raise ValueError("arxiv_429_backoff_seconds must be greater than 0.")
 
-    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
-    embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    qdrant_url = required_env("QDRANT_URL")
+    collection_name = required_env("QDRANT_COLLECTION")
+    embedding_model = required_env("OPENAI_EMBEDDING_MODEL")
 
     local_pdf_path = local_pdf.strip()
     if local_pdf_path:

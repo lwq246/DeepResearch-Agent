@@ -4,16 +4,17 @@ from typing import Any
 
 from langchain_openai import ChatOpenAI
 
-from .env import int_env_default
-from .env import openai_client_kwargs
+from backend.configuration import int_env
+from backend.configuration import openai_client_kwargs
+from backend.configuration import required_env
 from .sources import extract_pdf_text_with_pymupdf4llm_from_bytes
 
 
 def build_author_check_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=os.getenv("OPENAI_AUTHOR_CHECK_MODEL", os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini")),
+        model=required_env("OPENAI_AUTHOR_CHECK_MODEL"),
         temperature=0,
-        max_tokens=int_env_default("OPENAI_AUTHOR_CHECK_MAX_TOKENS", 160),
+        max_tokens=int_env("OPENAI_AUTHOR_CHECK_MAX_TOKENS"),
         **openai_client_kwargs(),
     )
 
@@ -69,6 +70,7 @@ def extract_authors_from_first_page(
                     "Extract paper author names from first-page text. "
                     "Return strict JSON only with this schema: "
                     '{"authors": ["Author One", "Author Two"]}. '
+                    "Normalize each author name to Title Case (capitalize each word), e.g., 'YASIN KABIR' -> 'Yasin Kabir'. "
                     "Do not include affiliations, emails, or explanations."
                 ),
             ),

@@ -7,6 +7,16 @@ from dotenv import load_dotenv
 from qdrant_client import QdrantClient, models
 
 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
 def point_payload(point: Any) -> dict[str, Any]:
     payload = getattr(point, "payload", None)
     if isinstance(payload, dict):
@@ -86,8 +96,8 @@ def build_filter(args: argparse.Namespace) -> models.Filter | None:
 def print_headers(args: argparse.Namespace) -> int:
     load_dotenv()
 
-    qdrant_url = args.url or os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection_name = args.collection or os.getenv("QDRANT_COLLECTION", "arxiv_docs")
+    qdrant_url = args.url or required_env("QDRANT_URL")
+    collection_name = args.collection or required_env("QDRANT_COLLECTION")
 
     client = QdrantClient(url=qdrant_url)
     scroll_filter = build_filter(args)

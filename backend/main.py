@@ -12,34 +12,25 @@ from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
-try:
-    from .ingest import build_author_check_llm
-    from .ingest import build_section_documents
-    from .graph import app as lang_graph
-    from .ingest import chunk_sections_from_extracted_text
-    from .ingest import extract_authors_from_first_page
-    from .ingest import extract_pdf_text_with_pymupdf4llm_from_bytes
-    from .models.api_models import ChatDebugResponse
-    from .models.api_models import ChatRequest
-    from .models.api_models import ChatResponse
-    from .models.api_models import ChatStreamDebugResponse
-    from .models.api_models import NodeUpdate
-    from .models.api_models import UploadPdfResponse
-    from .ingest import parse_max_pdf_pages
-except ImportError:
-    from ingest import build_author_check_llm
-    from ingest import build_section_documents
-    from graph import app as lang_graph
-    from ingest import chunk_sections_from_extracted_text
-    from ingest import extract_authors_from_first_page
-    from ingest import extract_pdf_text_with_pymupdf4llm_from_bytes
-    from models.api_models import ChatDebugResponse
-    from models.api_models import ChatRequest
-    from models.api_models import ChatResponse
-    from models.api_models import ChatStreamDebugResponse
-    from models.api_models import NodeUpdate
-    from models.api_models import UploadPdfResponse
-    from ingest import parse_max_pdf_pages
+from .configuration import bool_env
+from .configuration import int_env
+from .configuration import optional_env
+from .configuration import required_env
+from .graph import app as lang_graph
+from .ingest.authors import build_author_check_llm
+from .ingest.authors import extract_authors_from_first_page
+from .ingest.chunking import DEFAULT_EXCLUDE_REFERENCES
+from .ingest.chunking import chunk_sections_from_extracted_text
+from .ingest.documents import build_section_documents
+from .ingest.sources import extract_pdf_text_with_pymupdf4llm_from_bytes
+from .models.api_models import ChatDebugResponse
+from .models.api_models import ChatRequest
+from .models.api_models import ChatResponse
+from .models.api_models import ChatStreamDebugResponse
+from .models.api_models import NodeUpdate
+from .models.api_models import UploadPdfResponse
+from .configuration import parse_max_pdf_pages
+from .retrieval_config import UPLOAD_DEBUG_CONFIG
 
 
 app = FastAPI(title="ArXiv RAG Agent API")
@@ -71,8 +62,8 @@ logger = logging.getLogger(__name__)
 
 
 def openai_client_kwargs() -> dict[str, str]:
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-    if not base_url:
+    base_url = optional_env("OPENAI_BASE_URL")
+    if base_url is None:
         return {}
     return {"base_url": base_url}
 
@@ -114,8 +105,8 @@ def print_upload_summary(
     documents: list[Document],
     collection_name: str,
 ) -> None:
-    preview_chunks = max(0, int(os.getenv("UPLOAD_PRINT_PREVIEW_CHUNKS", "3")))
-    preview_chars = max(40, int(os.getenv("UPLOAD_PRINT_PREVIEW_CHARS", "160")))
+    preview_chunks = max(0, UPLOAD_DEBUG_CONFIG.preview_chunks)
+    preview_chars = max(40, UPLOAD_DEBUG_CONFIG.preview_chars)
 
     print(
         f"[upload-pdf] filename={filename} collection={collection_name} "
@@ -286,23 +277,12 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
         if not pdf_bytes:
             raise HTTPException(status_code=400, detail="Uploaded file is empty.")
 
-        max_pdf_pages = parse_max_pdf_pages(os.getenv("UPLOAD_MAX_PDF_PAGES", "all"))
-        min_chunk_chars = int(os.getenv("ARXIV_MIN_CHUNK_CHARS", "80"))
-        max_chunk_chars = int(os.getenv("ARXIV_MAX_CHUNK_CHARS", os.getenv("ARXIV_CHUNK_SIZE", "2500")))
-        chunk_overlap_chars = int(
-            os.getenv("ARXIV_CHUNK_OVERLAP_CHARS", os.getenv("ARXIV_CHUNK_OVERLAP", "500"))
-        )
-        exclude_references = os.getenv("ARXIV_EXCLUDE_REFERENCES", "true").strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-
-        upload_llm_author_check = os.getenv(
-            "UPLOAD_LLM_AUTHOR_CHECK_FIRST_PAGE",
-            os.getenv("ARXIV_LLM_AUTHOR_CHECK_FIRST_PAGE", "true"),
-        ).strip().lower() in {"1", "true", "yes", "on"}
+        max_pdf_pages = parse_max_pdf_pages(required_env("UPLOAD_MAX_PDF_PAGES"))
+        min_chunk_chars = int_env("ARXIV_MIN_CHUNK_CHARS")
+        max_chunk_chars = int_env("ARXIV_MAX_CHUNK_CHARS")
+        chunk_overlap_chars = int_env("ARXIV_CHUNK_OVERLAP_CHARS")
+        exclude_references = DEFAULT_EXCLUDE_REFERENCES
+        upload_llm_author_check = bool_env("UPLOAD_LLM_AUTHOR_CHECK_FIRST_PAGE")
 
         authors: list[str] = []
         if upload_llm_author_check:
@@ -334,9 +314,9 @@ async def upload_pdf(file: UploadFile = File(...)) -> UploadPdfResponse:
         if not documents:
             raise HTTPException(status_code=400, detail="Failed to split PDF into section-aware chunks.")
 
-        embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
-        qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-        collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
+        embedding_model = required_env("OPENAI_EMBEDDING_MODEL")
+        qdrant_url = required_env("QDRANT_URL")
+        collection_name = required_env("QDRANT_COLLECTION")
         embeddings = OpenAIEmbeddings(model=embedding_model, **openai_client_kwargs())
 
         print_upload_summary(

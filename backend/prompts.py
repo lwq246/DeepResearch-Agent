@@ -21,6 +21,7 @@ QUERY_REWRITE_SYSTEM_PROMPT = (
 AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT = (
     "Extract whether the user is asking for papers by a specific author. "
     "Return strict JSON only with keys: is_author_query (boolean) and author (string). "
+    "Normalize the author name to Title Case (capitalize each word), e.g., 'YASIN KABIR' -> 'Yasin Kabir'. "
     "If the request is not an author query, return "
     "{\"is_author_query\": false, \"author\": \"\"}."
 )

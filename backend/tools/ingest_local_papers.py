@@ -6,14 +6,28 @@ from dotenv import load_dotenv
 from langchain_openai import OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
-from ingest import build_documents_from_local_pdf, openai_client_kwargs, parse_max_pdf_pages
+from backend.configuration import openai_client_kwargs
+from backend.configuration import parse_max_pdf_pages
+from backend.ingest.chunking import DEFAULT_EXCLUDE_REFERENCES
+from backend.ingest.documents import build_documents_from_local_pdf
 
 
-def bool_env(name: str, default: bool = False) -> bool:
+def required_env(name: str) -> str:
     raw = os.getenv(name)
     if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
+def int_env(name: str) -> int:
+    raw = required_env(name)
+    try:
+        return int(raw)
+    except ValueError:
+        raise RuntimeError(f"Invalid integer for {name}: {raw}")
 
 
 def parse_args() -> argparse.Namespace:
@@ -38,31 +52,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-pdf-pages",
         type=str,
-        default=os.getenv("ARXIV_MAX_PDF_PAGES", "all"),
+        default=required_env("ARXIV_MAX_PDF_PAGES"),
         help="Maximum pages to parse per PDF (default: all)",
     )
     parser.add_argument(
         "--min-chunk-chars",
         type=int,
-        default=int(os.getenv("ARXIV_MIN_CHUNK_CHARS", "80")),
+        default=int_env("ARXIV_MIN_CHUNK_CHARS"),
         help="Minimum characters required for a chunk",
     )
     parser.add_argument(
         "--max-chunk-chars",
         type=int,
-        default=int(os.getenv("ARXIV_MAX_CHUNK_CHARS", "2500")),
+        default=int_env("ARXIV_MAX_CHUNK_CHARS"),
         help="Maximum characters before splitting a chunk",
     )
     parser.add_argument(
         "--chunk-overlap-chars",
         type=int,
-        default=int(os.getenv("ARXIV_CHUNK_OVERLAP_CHARS", "500")),
+        default=int_env("ARXIV_CHUNK_OVERLAP_CHARS"),
         help="Trailing overlap repeated in the next chunk",
     )
     parser.add_argument(
         "--exclude-references",
         action="store_true",
-        default=bool_env("ARXIV_EXCLUDE_REFERENCES", True),
+        default=DEFAULT_EXCLUDE_REFERENCES,
         help="Skip references/bibliography sections",
     )
     parser.add_argument(
@@ -97,9 +111,9 @@ def main() -> None:
     if not pdf_files:
         raise RuntimeError(f"No files matched '{args.pattern}' under: {paper_dir}")
 
-    qdrant_url = os.getenv("QDRANT_URL", "http://localhost:6333")
-    collection_name = os.getenv("QDRANT_COLLECTION", "arxiv_docs")
-    embedding_model = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+    qdrant_url = required_env("QDRANT_URL")
+    collection_name = required_env("QDRANT_COLLECTION")
+    embedding_model = required_env("OPENAI_EMBEDDING_MODEL")
 
     print(f"Found {len(pdf_files)} PDF files in: {paper_dir}")
 

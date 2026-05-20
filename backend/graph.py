@@ -1,29 +1,20 @@
+from pathlib import Path
+
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
 
-try:
-    from .nodes import build_context
-    from .nodes import generate
-    from .nodes import react_plan
-    from .nodes import retrieve
-    from .nodes import route_after_validation
-    from .nodes import route_react_action
-    from .nodes import validate_evidence
-    from .nodes import web_search
-    from .state import GraphState
-except ImportError:
-    from nodes import build_context
-    from nodes import generate
-    from nodes import react_plan
-    from nodes import retrieve
-    from nodes import route_after_validation
-    from nodes import route_react_action
-    from nodes import validate_evidence
-    from nodes import web_search
-    from state import GraphState
+from .nodes import build_context
+from .nodes import generate
+from .nodes import react_plan
+from .nodes import retrieve
+from .nodes import route_after_validation
+from .nodes import route_react_action
+from .nodes import validate_evidence
+from .nodes import web_search
+from .state import GraphState
 
 
-load_dotenv()
+load_dotenv(Path(__file__).resolve().parent / ".env")
 
 
 workflow = StateGraph(GraphState)

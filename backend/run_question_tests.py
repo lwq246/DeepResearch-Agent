@@ -225,6 +225,32 @@ def parse_float(value: Any) -> float | None:
         return None
 
 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
+def required_float_env(name: str) -> float:
+    value = parse_float(required_env(name))
+    if value is None:
+        raise RuntimeError(f"Invalid float for {name}")
+    return value
+
+
+def required_bool_env(name: str) -> bool:
+    raw = required_env(name).lower()
+    if raw in {"1", "true", "yes", "y", "on"}:
+        return True
+    if raw in {"0", "false", "no", "n", "off"}:
+        return False
+    raise RuntimeError(f"Invalid boolean for {name}: {raw}")
+
+
 def load_local_dotenv() -> None:
     if load_dotenv is None:
         return
@@ -557,27 +583,20 @@ def write_json_report(
 def main() -> int:
     load_local_dotenv()
     script_dir = Path(__file__).resolve().parent
-    workspace_root = script_dir.parent
-    default_pdf_dir = workspace_root / "paper"
-    default_report_path = script_dir / "logs" / "ten_question_eval_latest.json"
+    base_url = required_env("RAG_TEST_BASE_URL")
+    endpoint = required_env("RAG_TEST_ENDPOINT")
+    timeout = required_float_env("RAG_TEST_TIMEOUT")
 
-    base_url = os.getenv("RAG_TEST_BASE_URL", "http://localhost:8000")
-    endpoint = os.getenv("RAG_TEST_ENDPOINT", "/chat/debug")
+    report_json = required_env("RAG_TEST_REPORT_JSON")
+    upload_before_run = required_bool_env("RAG_TEST_UPLOAD_BEFORE_RUN")
+    pdf_dir = Path(required_env("RAG_TEST_PDF_DIR"))
+    pdf_glob = required_env("RAG_TEST_PDF_GLOB")
+    upload_endpoint = required_env("RAG_TEST_UPLOAD_ENDPOINT")
 
-    timeout_env = parse_float(os.getenv("RAG_TEST_TIMEOUT"))
-    timeout = timeout_env if timeout_env is not None else 120.0
-
-    report_json = os.getenv("RAG_TEST_REPORT_JSON", str(default_report_path))
-    upload_before_run = coerce_bool(os.getenv("RAG_TEST_UPLOAD_BEFORE_RUN", "false"))
-    pdf_dir = Path(os.getenv("RAG_TEST_PDF_DIR", str(default_pdf_dir)))
-    pdf_glob = os.getenv("RAG_TEST_PDF_GLOB", "*.pdf")
-    upload_endpoint = os.getenv("RAG_TEST_UPLOAD_ENDPOINT", "/upload-pdf")
-
-    llm_judge_model = os.getenv("OPENAI_CHAT_MODEL", "openai/gpt-4o-mini")
-    llm_judge_base_url = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
-    llm_judge_api_key = os.getenv("OPENAI_API_KEY", "")
-    llm_judge_timeout_env = parse_float(os.getenv("RAG_TEST_LLM_JUDGE_TIMEOUT"))
-    llm_judge_timeout = llm_judge_timeout_env if llm_judge_timeout_env is not None else 60.0
+    llm_judge_model = required_env("OPENAI_CHAT_MODEL")
+    llm_judge_base_url = required_env("OPENAI_BASE_URL")
+    llm_judge_api_key = required_env("OPENAI_API_KEY")
+    llm_judge_timeout = required_float_env("RAG_TEST_LLM_JUDGE_TIMEOUT")
 
     if upload_before_run:
         try:
@@ -602,12 +621,6 @@ def main() -> int:
         print(f"Error while running tests: {exc}", file=sys.stderr)
         return 2
 
-    if not str(llm_judge_api_key).strip():
-        print(
-            "Error while running LLM judge: missing API key. Set OPENAI_API_KEY in .env or environment.",
-            file=sys.stderr,
-        )
-        return 2
     try:
         run_llm_judging(
             results,

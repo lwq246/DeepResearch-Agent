@@ -7,7 +7,7 @@ from langchain_core.documents import Document
 from .authors import build_author_check_llm
 from .authors import extract_authors_from_first_page
 from .chunking import chunk_sections_from_extracted_text
-from .env import paper_id_from_source_url
+from backend.configuration import paper_id_from_source_url
 from .sources import download_pdf_bytes
 from .sources import extract_pdf_text_with_pymupdf4llm_from_bytes
 

@@ -1,42 +1,20 @@
 from typing import Any
 
-try:
-    from ..configuration import bool_env
-    from ..configuration import get_planner_llm
-    from ..configuration import get_query_rewrite_llm
-    from ..configuration import get_reflection_llm
-    from ..prompts import AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT
-    from ..prompts import PLANNER_SYSTEM_PROMPT
-    from ..prompts import QUERY_REWRITE_SYSTEM_PROMPT
-    from ..prompts import REFLECTION_SYSTEM_PROMPT
-    from .shared import coerce_bool
-    from .shared import current_date_iso
-    from .shared import llm_json_response
-    from .shared import normalize_author_name
-    from .shared import relative_month_target
-    from .shared import summarize_documents_for_prompt
-    from .shared import temporal_window_label
-except ImportError:
-    from configuration import bool_env
-    from configuration import get_planner_llm
-    from configuration import get_query_rewrite_llm
-    from configuration import get_reflection_llm
-    from prompts import AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT
-    from prompts import PLANNER_SYSTEM_PROMPT
-    from prompts import QUERY_REWRITE_SYSTEM_PROMPT
-    from prompts import REFLECTION_SYSTEM_PROMPT
-    from nodes.shared import coerce_bool
-    from nodes.shared import current_date_iso
-    from nodes.shared import llm_json_response
-    from nodes.shared import normalize_author_name
-    from nodes.shared import relative_month_target
-    from nodes.shared import summarize_documents_for_prompt
-    from nodes.shared import temporal_window_label
+
+from ..configuration import get_planner_llm
+from ..configuration import get_query_rewrite_llm
+from ..configuration import get_reflection_llm
+from ..prompts import AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT
+from ..prompts import PLANNER_SYSTEM_PROMPT
+from ..prompts import QUERY_REWRITE_SYSTEM_PROMPT
+from ..prompts import REFLECTION_SYSTEM_PROMPT
+from .shared import coerce_bool
+from .shared import current_date_iso
+from .shared import llm_json_response
+from .shared import summarize_documents_for_prompt
+
 
 def llm_extract_author_constraint(question: str) -> str | None:
-    if not bool_env("LLM_AUTHOR_QUERY_ENABLED", True):
-        return None
-
     parsed = llm_json_response(
         llm=get_planner_llm(),
         system_prompt=AUTHOR_QUERY_EXTRACTION_SYSTEM_PROMPT,
@@ -47,7 +25,7 @@ def llm_extract_author_constraint(question: str) -> str | None:
         return None
 
     is_author_query = coerce_bool(parsed.get("is_author_query", False), default=False)
-    candidate = normalize_author_name(str(parsed.get("author", "")))
+    candidate = str(parsed.get("author", "")).strip()
     if is_author_query and len(candidate) >= 3:
         return candidate
 
@@ -63,9 +41,6 @@ def llm_plan_action(
     web_attempts: int,
     max_web_attempts: int,
 ) -> tuple[str, str, bool]:
-    if not bool_env("LLM_PLANNER_ENABLED", True):
-        return fallback_action, fallback_thought, fallback_requires_web
-
     parsed = llm_json_response(
         llm=get_planner_llm(),
         system_prompt=PLANNER_SYSTEM_PROMPT,
@@ -96,18 +71,7 @@ def llm_rewrite_web_query(
     attempt_index: int = 0,
     previous_query: str = "",
 ) -> str:
-    if not bool_env("LLM_QUERY_REWRITE_ENABLED", True):
-        if attempt_index <= 0:
-            return default_query
-        if previous_query and previous_query.strip().casefold() != default_query.strip().casefold():
-            return default_query
-        return f"{default_query} official sources"
-
-    temporal_target = relative_month_target(question)
-    if temporal_target:
-        target_hint = temporal_window_label(*temporal_target)
-    else:
-        target_hint = "none"
+    target_hint = "none"
 
     retry_hint = ""
     if attempt_index > 0:
@@ -158,14 +122,7 @@ def llm_reflect_evidence(
     default_evidence_ok: bool,
     default_needs_more_web: bool,
 ) -> tuple[bool, bool, bool, list[str], str]:
-    if not bool_env("LLM_REFLECTION_ENABLED", True):
-        return default_evidence_ok, default_needs_more_web, default_requires_web, [], ""
-
-    temporal_target = relative_month_target(question)
-    if temporal_target:
-        target_hint = temporal_window_label(*temporal_target)
-    else:
-        target_hint = "none"
+    target_hint = "none"
 
     parsed = llm_json_response(
         llm=get_reflection_llm(),

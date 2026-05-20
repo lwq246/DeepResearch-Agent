@@ -8,12 +8,8 @@ from typing import Any
 
 import logfire
 
-try:
-    from .configuration import get_reflection_llm
-    from .graph import app as graph
-except ImportError:
-    from configuration import get_reflection_llm
-    from graph import app as graph
+from .configuration import get_reflection_llm
+from .graph import app as graph
 
 
 DEFAULT_EVAL_SET: list[dict[str, Any]] = [
@@ -70,12 +66,31 @@ DEFAULT_EVAL_SET: list[dict[str, Any]] = [
 ]
 
 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
+def bool_env(name: str) -> bool:
+    raw = required_env(name).lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Invalid boolean for {name}: {raw}")
+
+
 def configure_logfire() -> None:
-    enabled = os.getenv("LOGFIRE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+    enabled = bool_env("LOGFIRE_ENABLED")
     if not enabled:
         return
 
-    service_name = os.getenv("LOGFIRE_SERVICE_NAME", "arxiv-rag-agent-stream-demo")
+    service_name = required_env("LOGFIRE_SERVICE_NAME")
     try:
         logfire.configure(service_name=service_name)
         logfire.instrument_openai()

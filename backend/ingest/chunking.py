@@ -2,7 +2,7 @@ import re
 from typing import Any
 
 
-MAJOR_SECTION_KEYWORDS = {
+INCLUDE_SECTION_KEYWORDS = {
     "abstract",
     "introduction",
     "background",
@@ -20,6 +20,29 @@ MAJOR_SECTION_KEYWORDS = {
     "conclusions",
     "limitations",
     "future work",
+}
+
+FALLBACK_SECTION_KEYWORDS = {
+    "abstract",
+    "introduction",
+    "method",
+    "approach",
+    "experiment",
+    "results",
+    "conclusion",
+}
+
+EXCLUDE_SECTION_KEYWORDS = {
+    "references",
+    "bibliography",
+    "acknowledgements",
+    "acknowledgments",
+    "appendix",
+}
+
+DEFAULT_EXCLUDE_REFERENCES = True
+
+MAJOR_SECTION_KEYWORDS = INCLUDE_SECTION_KEYWORDS | FALLBACK_SECTION_KEYWORDS | {
     "references",
     "bibliography",
 }
@@ -82,7 +105,7 @@ def should_exclude_section(title: str, exclude_references: bool) -> bool:
     if not exclude_references:
         return False
     normalized = canonical_heading_key(title)
-    return normalized.startswith("references") or normalized.startswith("bibliography")
+    return any(normalized.startswith(keyword) for keyword in EXCLUDE_SECTION_KEYWORDS)
 
 
 def split_index_on_word_boundary(text: str, start: int, max_chars: int) -> int:

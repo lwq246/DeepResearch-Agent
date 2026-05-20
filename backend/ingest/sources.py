@@ -6,8 +6,8 @@ import arxiv
 import requests
 
 from .chunking import normalize_pdf_text
-from .env import parse_sort_criterion
-from .env import parse_sort_order
+from backend.configuration import parse_sort_criterion
+from backend.configuration import parse_sort_order
 
 
 def extract_pdf_text_with_pymupdf4llm_from_bytes(pdf_bytes: bytes, max_pages: int | None) -> str:

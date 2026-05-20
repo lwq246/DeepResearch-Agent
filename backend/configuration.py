@@ -1,86 +1,114 @@
 import os
 from functools import lru_cache
 
+import arxiv
 from langchain_community.tools.tavily_search import TavilySearchResults
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langchain_qdrant import QdrantVectorStore
 
 
+def required_env(name: str) -> str:
+    raw = os.getenv(name)
+    if raw is None:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    value = raw.strip()
+    if not value:
+        raise RuntimeError(f"Empty required environment variable: {name}")
+    return value
+
+
+def optional_env(name: str) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    return value or None
+
+
 def openai_client_kwargs() -> dict[str, str]:
-    base_url = os.getenv("OPENAI_BASE_URL", "").strip()
-    if not base_url:
+    base_url = optional_env("OPENAI_BASE_URL")
+    if base_url is None:
         return {}
     return {"base_url": base_url}
 
 
-def int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
+def int_env(name: str) -> int:
+    raw = required_env(name)
     try:
-        value = int(raw)
-        return value if value > 0 else default
+        return int(raw)
     except ValueError:
-        return default
+        raise RuntimeError(f"Invalid integer for {name}: {raw}")
 
 
-def float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
+def float_env(name: str) -> float:
+    raw = required_env(name)
     try:
         return float(raw)
     except ValueError:
-        return default
+        raise RuntimeError(f"Invalid float for {name}: {raw}")
 
 
-def bool_env(name: str, default: bool = False) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+def bool_env(name: str) -> bool:
+    raw = required_env(name).lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    raise RuntimeError(f"Invalid boolean for {name}: {raw}")
 
 
-def resolve_chat_model(primary_env: str) -> str:
-    primary = os.getenv(primary_env, "").strip()
-    if primary:
-        return primary
+def parse_max_pdf_pages(value: str | None) -> int | None:
+    if value is None:
+        return None
 
-    shared = os.getenv("OPENAI_CHAT_MODEL", "").strip()
-    if shared:
-        return shared
+    raw = str(value).strip().lower()
+    if raw in {"", "all", "none", "null", "0", "-1"}:
+        return None
 
-    return "gpt-4o-mini"
+    parsed = int(raw)
+    if parsed <= 0:
+        return None
+    return parsed
 
 
-def resolve_max_tokens(primary_env: str, default: int) -> int:
-    primary = os.getenv(primary_env)
-    if primary is not None:
-        try:
-            value = int(primary)
-            if value > 0:
-                return value
-        except ValueError:
-            pass
-    return int_env("OPENAI_MAX_TOKENS", default)
+def parse_sort_criterion(sort_by: str) -> arxiv.SortCriterion:
+    normalized = sort_by.strip().lower()
+    if normalized == "submitteddate":
+        return arxiv.SortCriterion.SubmittedDate
+    if normalized == "lastupdateddate":
+        return arxiv.SortCriterion.LastUpdatedDate
+    return arxiv.SortCriterion.Relevance
+
+
+def parse_sort_order(sort_order: str) -> arxiv.SortOrder:
+    normalized = sort_order.strip().lower()
+    if normalized == "ascending":
+        return arxiv.SortOrder.Ascending
+    return arxiv.SortOrder.Descending
+
+
+def paper_id_from_source_url(source_url: str | None) -> str:
+    if not source_url:
+        return "unknown"
+    return source_url.rstrip("/").split("/")[-1]
 
 
 @lru_cache(maxsize=1)
 def get_embeddings() -> OpenAIEmbeddings:
     return OpenAIEmbeddings(
-        model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        model=required_env("OPENAI_EMBEDDING_MODEL"),
         **openai_client_kwargs(),
     )
 
 
 @lru_cache(maxsize=1)
 def get_vector_store() -> QdrantVectorStore:
-    validate_embeddings = bool_env("QDRANT_VALIDATE_EMBEDDINGS", False)
-    validate_collection_config = bool_env("QDRANT_VALIDATE_COLLECTION_CONFIG", False)
+    validate_embeddings = bool_env("QDRANT_VALIDATE_EMBEDDINGS")
+    validate_collection_config = bool_env("QDRANT_VALIDATE_COLLECTION_CONFIG")
     return QdrantVectorStore.from_existing_collection(
         embedding=get_embeddings(),
-        collection_name=os.getenv("QDRANT_COLLECTION", "arxiv_docs"),
-        url=os.getenv("QDRANT_URL", "http://localhost:6333"),
+        collection_name=required_env("QDRANT_COLLECTION"),
+        url=required_env("QDRANT_URL"),
         validate_embeddings=validate_embeddings,
         validate_collection_config=validate_collection_config,
     )
@@ -94,9 +122,9 @@ def get_search_tool() -> TavilySearchResults:
 @lru_cache(maxsize=1)
 def get_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=os.getenv("OPENAI_CHAT_MODEL", "gpt-4o-mini"),
+        model=required_env("OPENAI_CHAT_MODEL"),
         temperature=0,
-        max_tokens=resolve_max_tokens("OPENAI_ANSWER_MAX_TOKENS", 1200),
+        max_tokens=int_env("OPENAI_ANSWER_MAX_TOKENS"),
         **openai_client_kwargs(),
     )
 
@@ -104,9 +132,9 @@ def get_llm() -> ChatOpenAI:
 @lru_cache(maxsize=1)
 def get_planner_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=resolve_chat_model("OPENAI_PLANNER_MODEL"),
+        model=required_env("OPENAI_PLANNER_MODEL"),
         temperature=0,
-        max_tokens=resolve_max_tokens("OPENAI_PLANNER_MAX_TOKENS", 192),
+        max_tokens=int_env("OPENAI_PLANNER_MAX_TOKENS"),
         **openai_client_kwargs(),
     )
 
@@ -114,9 +142,9 @@ def get_planner_llm() -> ChatOpenAI:
 @lru_cache(maxsize=1)
 def get_query_rewrite_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=resolve_chat_model("OPENAI_QUERY_REWRITE_MODEL"),
+        model=required_env("OPENAI_QUERY_REWRITE_MODEL"),
         temperature=0,
-        max_tokens=resolve_max_tokens("OPENAI_QUERY_REWRITE_MAX_TOKENS", 192),
+        max_tokens=int_env("OPENAI_QUERY_REWRITE_MAX_TOKENS"),
         **openai_client_kwargs(),
     )
 
@@ -124,8 +152,8 @@ def get_query_rewrite_llm() -> ChatOpenAI:
 @lru_cache(maxsize=1)
 def get_reflection_llm() -> ChatOpenAI:
     return ChatOpenAI(
-        model=resolve_chat_model("OPENAI_REFLECTION_MODEL"),
+        model=required_env("OPENAI_REFLECTION_MODEL"),
         temperature=0,
-        max_tokens=resolve_max_tokens("OPENAI_REFLECTION_MAX_TOKENS", 256),
+        max_tokens=int_env("OPENAI_REFLECTION_MAX_TOKENS"),
         **openai_client_kwargs(),
     )
