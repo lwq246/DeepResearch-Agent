@@ -21,6 +21,27 @@ The system is designed for evidence-first answers: every response is grounded in
 - Benchmark harness (`run_question_tests.py`) with LLM-based answer judging and report generation
 - Logfire instrumentation for API, node-level, Pydantic, and OpenAI telemetry
 
+## Chunking Pipeline
+
+```text
+[ Raw Extracted Text ]
+     |
+     v
+ 1. Text Hygiene & Cleanup (Removes headers, footers, and references)
+     |
+     v
+ 2. Section Detection (Splits text dynamically by identified headings)
+     |
+     v
+ 3. Oversized Text Splitting (Cuts large sections at paragraph/word boundaries)
+     |
+     v
+ 4. Context Overlapping (Appends the end of Part A to the start of Part B)
+     |
+     v
+[ Cleaned, Numbered Chunks ]
+```
+
 ## Architecture
 
 The LangGraph workflow in `backend/graph.py` is:
