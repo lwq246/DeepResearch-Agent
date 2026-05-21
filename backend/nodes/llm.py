@@ -60,7 +60,7 @@ def llm_plan_action(
     thought = str(parsed.get("thought", "")).strip() or fallback_thought
     requires_web_value = coerce_bool(parsed.get("requires_web", fallback_requires_web), default=fallback_requires_web)
 
-    if action not in {"retrieve", "web_search", "build_context"}:
+    if action not in {"retrieve", "web_search", "generate"}:
         return fallback_action, fallback_thought, requires_web_value
     return action, thought, requires_web_value
 
@@ -71,8 +71,6 @@ def llm_rewrite_web_query(
     attempt_index: int = 0,
     previous_query: str = "",
 ) -> str:
-    target_hint = "none"
-
     retry_hint = ""
     if attempt_index > 0:
         prior = previous_query.strip() or default_query
@@ -88,7 +86,6 @@ def llm_rewrite_web_query(
         system_prompt=QUERY_REWRITE_SYSTEM_PROMPT,
         human_prompt=(
             f"Current date: {current_date_iso()}\n"
-            f"Resolved target window: {target_hint}\n"
             f"User question: {question}\n"
             f"Default rewritten query: {default_query}\n"
             f"{retry_hint}\n"
@@ -122,14 +119,11 @@ def llm_reflect_evidence(
     default_evidence_ok: bool,
     default_needs_more_web: bool,
 ) -> tuple[bool, bool, bool, list[str], str]:
-    target_hint = "none"
-
     parsed = llm_json_response(
         llm=get_reflection_llm(),
         system_prompt=REFLECTION_SYSTEM_PROMPT,
         human_prompt=(
             f"Current date: {current_date_iso()}\n"
-            f"Resolved target window: {target_hint}\n"
             f"Question: {question}\n"
             f"Signals: local_ok={local_ok}, web_ok={web_ok}, web_attempts={web_attempts}/{max_web_attempts}\n"
             f"Heuristic baseline: evidence_ok={default_evidence_ok}, needs_more_web={default_needs_more_web}\n"

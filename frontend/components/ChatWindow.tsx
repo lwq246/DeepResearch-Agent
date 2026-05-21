@@ -33,6 +33,10 @@ const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
 function sourceHref(source: Source): string | null {
+  const origin = (source.origin ?? "").toLowerCase();
+  if (origin === "qdrant" || origin === "local") {
+    return null;
+  }
   const value = source.source ?? source.url ?? "";
   if (!value) {
     return null;

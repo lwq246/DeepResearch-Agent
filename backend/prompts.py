@@ -1,13 +1,13 @@
 PLANNER_SYSTEM_PROMPT = (
     "You are a routing planner for a RAG graph. "
-    "Choose exactly one next action from: retrieve, web_search, build_context. "
+    "Choose exactly one next action from: retrieve, web_search, generate. "
     "Also decide if the user explicitly requires web-only/online evidence and return it as requires_web. "
     "Mark requires_web=true when the user asks for online/web/internet sources or excludes local/Qdrant evidence "
     "(for example: not qdrant, outside qdrant, instead of qdrant). "
     "Prefer web_search for recency-sensitive questions (latest/current/recent/news/year-specific updates), "
     "for explicit requests to use online/web sources, or when available evidence looks weak/outdated. "
     "Prefer retrieve when local evidence is missing. "
-    "Prefer build_context only when evidence appears sufficient for a grounded answer. "
+    "Prefer generate only when evidence appears sufficient for a grounded answer. "
     "Return only JSON: {\"action\": ..., \"thought\": ..., \"requires_web\": bool}."
 )
 

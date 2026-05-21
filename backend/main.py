@@ -45,7 +45,12 @@ app.add_middleware(
 
 
 def configure_logfire(app_instance: FastAPI) -> None:
-    service_name = "rag-agent"
+    enabled = bool_env("LOGFIRE_ENABLED")
+    if not enabled:
+        os.environ.setdefault("LOGFIRE_IGNORE_NO_CONFIG", "1")
+        return
+
+    service_name = required_env("LOGFIRE_SERVICE_NAME")
     try:
         logfire.configure(service_name=service_name)
         logfire.instrument_fastapi(app_instance)
@@ -54,6 +59,7 @@ def configure_logfire(app_instance: FastAPI) -> None:
         logfire.info("logfire_configured", service_name=service_name)
     except Exception as exc:
         # Keep the API available if observability configuration fails.
+        os.environ.setdefault("LOGFIRE_IGNORE_NO_CONFIG", "1")
         print(f"[observability] logfire setup failed: {exc}", flush=True)
 
 

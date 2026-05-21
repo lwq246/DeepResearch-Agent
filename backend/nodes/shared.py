@@ -49,7 +49,7 @@ def coerce_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
-def summarize_documents_for_prompt(documents: list[dict[str, Any]], max_items: int = 8) -> str:
+def summarize_documents_for_prompt(documents: list[dict[str, Any]], max_items: int = 12) -> str:
     if not documents:
         return "No documents."
 

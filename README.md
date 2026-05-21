@@ -4,7 +4,7 @@ DeepResearch RAG Agent is a full-stack Retrieval-Augmented Generation (RAG) appl
 
 - Local paper retrieval from Qdrant for high-relevance domain context
 - Fallback web search for freshness and missing evidence
-- A LangGraph ReAct-style workflow for controlled routing and retry decisions
+- A LangGraph ReAct-style workflow for controlled routing, retries, and reflection
 - FastAPI backend and Next.js frontend for end-to-end interaction
 
 The system is designed for evidence-first answers: every response is grounded in retrieved context, citations are preserved through generation, and fallback behavior is explicit when local evidence is weak or incomplete.
@@ -14,6 +14,8 @@ The system is designed for evidence-first answers: every response is grounded in
 - Agentic routing with explicit nodes (`react_plan`, `retrieve`, `web_search`, `validate_evidence`, `build_context`, `generate`)
 - Hybrid evidence strategy: local-first retrieval with controlled web fallback when evidence is insufficient
 - Prompt-driven web-only intent detection (`requires_web`) in planner and reflection steps
+- Retry-aware web query rewriting to avoid repeating weak search intents across attempts
+- Source-balanced context assembly for final generation (local and web evidence)
 - Section-aware full-text PDF ingestion with chunking and overlap controls
 - Upload pipeline that extracts PDF text, derives metadata, and indexes section-level chunks in Qdrant
 - Benchmark harness (`run_question_tests.py`) with LLM-based answer judging and report generation
@@ -27,8 +29,7 @@ The LangGraph workflow in `backend/graph.py` is:
 2. `retrieve` or `web_search`
 3. `validate_evidence`
 4. Loop back to `react_plan` if fallback is needed
-5. `build_context`
-6. `generate`
+5. `generate`
 
 This gives a deterministic control loop with LLM-assisted planning and reflection.
 
@@ -42,11 +43,10 @@ flowchart TD
     B --> D[validate_evidence]
     C --> D
 
-    D -->|valid| E[build_context]
+    D -->|valid| E[generate]
     D -->|invalid_or_retry| A
 
-    E --> F[generate]
-    F --> G[END]
+    E --> F[END]
 
 ```
 
@@ -73,7 +73,7 @@ flowchart TD
 │   ├── app/
 │   ├── components/
 │   └── package.json
-├── docker-compose.yml             # Qdrant service
+├── docker-compose.yml             # Qdrant + backend services
 └── README.md
 ```
 
@@ -81,6 +81,6 @@ flowchart TD
 
 - Python 3.11+ (tested with 3.12)
 - Node.js 18+
-- Docker Desktop (for Qdrant)
+- Docker Desktop (for Qdrant/backend containers)
 - OpenAI-compatible API key
 - Tavily API key (for web search)

@@ -18,8 +18,9 @@ services:
       - "8000:8000"
     env_file:
       - ./backend/.env
+    working_dir: /project
     volumes:
-      - ./backend:/app
+      - ./backend:/project/backend
 
 volumes:
   qdrant_data:

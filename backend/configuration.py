@@ -116,7 +116,7 @@ def get_vector_store() -> QdrantVectorStore:
 
 @lru_cache(maxsize=1)
 def get_search_tool() -> TavilySearchResults:
-    return TavilySearchResults(max_results=5)
+    return TavilySearchResults(max_results=int_env("MAX_WEB_RESULTS"))
 
 
 @lru_cache(maxsize=1)

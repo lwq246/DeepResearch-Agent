@@ -4,9 +4,9 @@ from dataclasses import dataclass
 @dataclass(frozen=True)
 class RetrievalConfig:
     max_author_candidates: int = 70
-    max_context_docs: int = 6
+    max_context_docs: int = 12
     max_chunks_per_paper: int = 3
-    max_chunks_per_paper_author_query: int = 6
+    max_chunks_per_paper_author_query: int = 8
     max_unique_papers: int = 4
 
 

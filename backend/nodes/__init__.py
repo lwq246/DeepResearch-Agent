@@ -94,12 +94,12 @@ def pick_react_action(
     force_web_fallback: bool,
 ) -> tuple[str, str]:
     if step >= max_steps or web_attempts >= max_web_attempts:
-        return "build_context", "Safety limit reached; proceeding with available evidence."
+        return "generate", "Safety limit reached; proceeding with available evidence."
 
     if fallback:
         if web_attempts < max_web_attempts:
             return "web_search", "Evidence quality is insufficient; run another web retrieval step."
-        return "build_context", "Reached web retry limit; proceed with best available evidence."
+        return "generate", "Reached web retry limit; proceed with best available evidence."
 
     if requires_web and not has_web_docs:
         return "web_search", "Question requires web evidence; run web retrieval before local search."
@@ -110,7 +110,7 @@ def pick_react_action(
     if force_web_fallback and not has_web_docs:
         return "web_search", "Web fallback is forced; gather web evidence."
 
-    return "build_context", "Evidence looks sufficient; build final context."
+    return "generate", "Evidence looks sufficient; build final context."
 
 
 @traced_node("react_plan")
@@ -160,13 +160,13 @@ def react_plan(state: GraphState) -> dict[str, Any]:
     }
 
 
-def route_react_action(state: GraphState) -> Literal["retrieve", "web_search", "build_context"]:
-    action = str(state.get("next_action", "build_context"))
+def route_react_action(state: GraphState) -> Literal["retrieve", "web_search", "generate"]:
+    action = str(state.get("next_action", "generate"))
     if action == "retrieve":
         return "retrieve"
     if action == "web_search":
         return "web_search"
-    return "build_context"
+    return "generate"
 
 
 @traced_node("retrieve")
@@ -179,7 +179,6 @@ def retrieve(state: GraphState) -> dict[str, Any]:
     max_chunks_per_paper = RETRIEVAL_CONFIG.max_chunks_per_paper
     max_chunks_per_paper_author_query = RETRIEVAL_CONFIG.max_chunks_per_paper_author_query
     max_unique_papers = RETRIEVAL_CONFIG.max_unique_papers
-    relevance_threshold = float_env("RELEVANCE_THRESHOLD")
     force_web_fallback = bool_env("FORCE_WEB_FALLBACK")
 
     requested_author = llm_extract_author_constraint(question)
@@ -194,6 +193,13 @@ def retrieve(state: GraphState) -> dict[str, Any]:
             max_unique_papers=max_unique_papers,
         )
         if not author_documents:
+            # logfire.info(
+            #     "qdrant_retrieve",
+            #     mode="author",
+            #     requested_author=requested_author,
+            #     matched=0,
+            #     candidate_limit=max_author_candidates,
+            # )
             return {
                 "documents": [],
                 "fallback": True,
@@ -211,6 +217,20 @@ def retrieve(state: GraphState) -> dict[str, Any]:
             }
 
         top_author_score = max((safe_float(doc.get("score", 0.0)) for doc in author_documents), default=0.0)
+        # logfire.info(
+        #     "qdrant_retrieve",
+        #     mode="author",
+        #     requested_author=requested_author,
+        #     matched=len(author_documents),
+        #     candidate_limit=max_author_candidates,
+        #     top_score=top_author_score,
+        # )
+        logfire.info(
+            "qdrant_retrieve_documents",
+            mode="author",
+            requested_author=requested_author,
+            documents=author_documents,
+        )
         return {
             "documents": author_documents,
             "fallback": force_web_fallback,
@@ -229,6 +249,12 @@ def retrieve(state: GraphState) -> dict[str, Any]:
 
     matches = vector_store.similarity_search_with_relevance_scores(question, k=max_qdrant_candidates)
     if not matches:
+        # logfire.info(
+        #     "qdrant_retrieve",
+        #     mode="query",
+        #     matched=0,
+        #     max_candidates=max_qdrant_candidates,
+        # )
         return {
             "documents": [],
             "fallback": True,
@@ -265,17 +291,30 @@ def retrieve(state: GraphState) -> dict[str, Any]:
         if len(documents) >= max_context_docs:
             break
 
+    # logfire.info(
+    #     "qdrant_retrieve",
+    #     mode="query",
+    #     matched=len(documents),
+    #     max_candidates=max_qdrant_candidates,
+    #     max_context_docs=max_context_docs,
+    #     top_score=top_score,
+    # )
+    logfire.info(
+        "qdrant_retrieve_documents",
+        mode="query",
+        documents=documents,
+    )
+
     return {
         "documents": documents,
-        "fallback": force_web_fallback or (top_score < relevance_threshold) or (not documents),
+        "fallback": force_web_fallback or (not documents),
         "top_score": top_score,
         "evidence_ok": False,
         "web_attempts": 0,
         "react_trace": append_trace(
             state,
             (
-                f"retrieve: kept={len(documents)} top_score={top_score:.3f} "
-                f"threshold={relevance_threshold:.3f}"
+                f"retrieve: kept={len(documents)} top_score={top_score:.3f}"
             ),
         ),
     }
@@ -318,6 +357,22 @@ def web_search(state: GraphState) -> dict[str, Any]:
     ]
     top_web_score = max((safe_float(doc.get("score", 0.0)) for doc in scored_web_documents), default=0.0)
 
+    logfire.info(
+        "web_retrieve",
+        query=web_query,
+        results=len(results),
+        kept=len(scored_web_documents),
+        max_results=max_web_results,
+        threshold=web_relevance_threshold,
+        top_score=top_web_score,
+    )
+    logfire.info(
+        "web_retrieve_documents",
+        query=web_query,
+        documents=web_documents,
+        scored_documents=scored_web_documents,
+    )
+
     return {
         "documents": existing_documents + scored_web_documents,
         "fallback": False,
@@ -334,12 +389,73 @@ def web_search(state: GraphState) -> dict[str, Any]:
     }
 
 
+def curate_documents(
+    documents: list[dict[str, Any]],
+    *,
+    max_context_docs: int,
+    requires_web: bool,
+    prefer_web_first: bool,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    seen_keys: set[str] = set()
+    unique_documents: list[dict[str, Any]] = []
+
+    for document in documents:
+        key = document_dedup_key(document)
+
+        if not key or key in seen_keys:
+            continue
+
+        seen_keys.add(key)
+        unique_documents.append(document)
+
+    unique_documents.sort(
+        key=lambda doc: (
+            (
+                0
+                if str(doc.get("origin", "")) == ("web" if prefer_web_first else "qdrant")
+                else 1
+            ),
+            -safe_float(doc.get("score", 0.0)),
+        )
+    )
+
+    web_documents = [doc for doc in unique_documents if str(doc.get("origin", "")) == "web"]
+    qdrant_documents = [doc for doc in unique_documents if str(doc.get("origin", "")) == "qdrant"]
+
+    if web_documents:
+        top_web_documents = sorted(
+            web_documents,
+            key=lambda doc: -safe_float(doc.get("score", 0.0)),
+        )[:6]
+        top_qdrant_documents = sorted(
+            qdrant_documents,
+            key=lambda doc: -safe_float(doc.get("score", 0.0)),
+        )[:6]
+        final_documents = top_web_documents + top_qdrant_documents
+        if not qdrant_documents:
+            final_documents = top_web_documents
+    else:
+        local_cap = min(8, max_context_docs)
+        final_documents = qdrant_documents[:local_cap]
+
+    return final_documents, unique_documents
+
+
 @traced_node("validate_evidence")
 def validate_evidence(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
     requires_web = resolve_requires_web(state, question)
     requested_author = str(state.get("author_constraint", "")).strip()
+    max_context_docs = RETRIEVAL_CONFIG.max_context_docs
+    prefer_web_first = requires_web
+
+    curated_documents, unique_documents = curate_documents(
+        documents,
+        max_context_docs=max_context_docs,
+        requires_web=requires_web,
+        prefer_web_first=prefer_web_first,
+    )
 
     min_local_docs = int_env("MIN_LOCAL_DOCS")
     min_web_docs = int_env("MIN_WEB_DOCS")
@@ -348,8 +464,8 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     max_web_attempts = int_env("MAX_WEB_ATTEMPTS")
     web_attempts = int(state.get("web_attempts", 0))
 
-    local_docs = [doc for doc in documents if str(doc.get("origin", "")) == "qdrant"]
-    web_docs = [doc for doc in documents if str(doc.get("origin", "")) == "web"]
+    local_docs = [doc for doc in curated_documents if str(doc.get("origin", "")) == "qdrant"]
+    web_docs = [doc for doc in curated_documents if str(doc.get("origin", "")) == "web"]
 
     local_ok = len(local_docs) >= (1 if requested_author else min_local_docs)
     web_rich_docs = [
@@ -361,16 +477,19 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     top_web_score = max((safe_float(doc.get("score", 0.0)) for doc in web_docs), default=0.0)
     web_ok = len(web_rich_docs) >= min_web_docs
 
+    required_total_docs = 1 if requested_author else 2
+    total_ok = (len(local_docs) + len(web_docs)) >= required_total_docs
+
     if requires_web:
-        evidence_ok = web_ok
+        evidence_ok = web_ok and total_ok
     else:
-        evidence_ok = local_ok or web_ok
+        evidence_ok = (local_ok or web_ok) and total_ok
 
     needs_more_web = (not evidence_ok) and (web_attempts < max_web_attempts)
 
     evidence_ok, needs_more_web, requires_web, missing_topics, reflection_reason = llm_reflect_evidence(
         question=question,
-        documents=documents,
+        documents=curated_documents,
         local_ok=local_ok,
         web_ok=web_ok,
         web_attempts=web_attempts,
@@ -395,10 +514,11 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
             state,
             (
                 "validate_evidence: "
-                f"local_ok={local_ok} web_ok={web_ok} evidence_ok={evidence_ok} "
+                f"local_ok={local_ok} web_ok={web_ok} total_ok={total_ok} evidence_ok={evidence_ok} "
                 f"top_web_score={top_web_score:.3f} web_threshold={web_relevance_threshold:.3f} "
                 f"needs_more_web={needs_more_web} requires_web={requires_web} "
                 f"author_target={requested_author or '-'} "
+                f"curated={len(curated_documents)} unique={len(unique_documents)} "
                 f"missing_topics={';'.join(missing_topics) if missing_topics else '-'} "
                 f"reflection_reason={reflection_reason or '-'}"
             ),
@@ -406,83 +526,10 @@ def validate_evidence(state: GraphState) -> dict[str, Any]:
     }
 
 
-def route_after_validation(state: GraphState) -> Literal["react_plan", "build_context"]:
+def route_after_validation(state: GraphState) -> Literal["react_plan", "generate"]:
     if state.get("fallback", False):
         return "react_plan"
-    return "build_context"
-
-
-@traced_node("build_context")
-def build_context(state: GraphState) -> dict[str, Any]:
-    documents = state.get("documents", [])
-    if not documents:
-        return {
-            "documents": [],
-            "react_trace": append_trace(state, "build_context: no documents available"),
-        }
-
-    max_context_docs = RETRIEVAL_CONFIG.max_context_docs
-    requires_web = resolve_requires_web(state, str(state.get("question", "")))
-    prefer_web_first = requires_web
-
-    seen_keys: set[str] = set()
-    unique_documents: list[dict[str, Any]] = []
-
-    for document in documents:
-        key = document_dedup_key(document)
-
-        if not key or key in seen_keys:
-            continue
-
-        seen_keys.add(key)
-        unique_documents.append(document)
-
-    if requires_web:
-        unique_documents = [
-            doc for doc in unique_documents if str(doc.get("origin", "")) == "web"
-        ]
-
-    unique_documents.sort(
-        key=lambda doc: (
-            (
-                0
-                if str(doc.get("origin", "")) == ("web" if prefer_web_first else "qdrant")
-                else 1
-            ),
-            -safe_float(doc.get("score", 0.0)),
-        )
-    )
-
-    if not requires_web:
-        web_documents = [doc for doc in unique_documents if str(doc.get("origin", "")) == "web"]
-        qdrant_documents = [doc for doc in unique_documents if str(doc.get("origin", "")) == "qdrant"]
-
-        if web_documents and qdrant_documents:
-            top_web_documents = sorted(
-                web_documents,
-                key=lambda doc: -safe_float(doc.get("score", 0.0)),
-            )[:3]
-            top_qdrant_documents = sorted(
-                qdrant_documents,
-                key=lambda doc: -safe_float(doc.get("score", 0.0)),
-            )[:3]
-            final_documents = top_web_documents + top_qdrant_documents
-        else:
-            final_documents = unique_documents[:max_context_docs]
-    else:
-        final_documents = unique_documents[:max_context_docs]
-
-    return {
-        "documents": final_documents,
-        "react_trace": append_trace(
-            state,
-            (
-                f"build_context: unique={len(unique_documents)} final={len(final_documents)} "
-                f"web={len([doc for doc in final_documents if str(doc.get('origin', '')) == 'web'])} "
-                f"qdrant={len([doc for doc in final_documents if str(doc.get('origin', '')) == 'qdrant'])}"
-            ),
-        ),
-    }
+    return "generate"
 
 
 @traced_node("generate")
@@ -490,29 +537,40 @@ def generate(state: GraphState) -> dict[str, Any]:
     question = state["question"]
     documents = state.get("documents", [])
     max_context_docs = RETRIEVAL_CONFIG.max_context_docs
-    prompt_documents = documents[:max_context_docs]
-
     requires_web = resolve_requires_web(state, question)
-    if requires_web:
-        web_documents = [
-            doc for doc in prompt_documents if str(doc.get("origin", "")) == "web"
-        ]
-        if web_documents:
-            prompt_documents = web_documents[:max_context_docs]
-        else:
-            return {
-                "generation": (
-                    "I could not find suitable online-only sources for this request yet. "
-                    "Try rephrasing with specific keywords or retry to fetch fresh web results."
-                ),
-                "documents": [],
-                "react_trace": append_trace(
-                    state,
-                    "generate_guard: requires_web requested but no web documents available",
-                ),
-            }
+    prefer_web_first = requires_web
 
-    temporal_hint = "none"
+    final_documents, unique_documents = curate_documents(
+        documents,
+        max_context_docs=max_context_docs,
+        requires_web=requires_web,
+        prefer_web_first=prefer_web_first,
+    )
+
+    web_final_count = len([doc for doc in final_documents if str(doc.get("origin", "")) == "web"])
+    qdrant_final_count = len([doc for doc in final_documents if str(doc.get("origin", "")) == "qdrant"])
+    react_trace = append_trace(
+        state,
+        (
+            f"build_context: unique={len(unique_documents)} final={len(final_documents)} "
+            f"web={web_final_count} qdrant={qdrant_final_count}"
+        ),
+    )
+
+    if requires_web and web_final_count == 0:
+        return {
+            "generation": (
+                "I could not find suitable online-only sources for this request yet. "
+                "Try rephrasing with specific keywords or retry to fetch fresh web results."
+            ),
+            "documents": [],
+            "react_trace": append_trace(
+                {"react_trace": react_trace},
+                "generate_guard: requires_web requested but no web documents available",
+            ),
+        }
+
+    prompt_documents = final_documents[:max_context_docs]
 
     context = "\n\n".join(
         [
@@ -543,7 +601,6 @@ def generate(state: GraphState) -> dict[str, Any]:
                 "human",
                 (
                     f"Current date: {current_date_iso()}\n"
-                    f"Resolved target window: {temporal_hint}\n"
                     f"Question: {question}\n\nContext:\n{context}"
                 ),
             ),
@@ -614,7 +671,7 @@ def generate(state: GraphState) -> dict[str, Any]:
         cited_documents = dedupe_by_source(prompt_documents)[: min(3, len(prompt_documents))]
 
     generation_trace = append_trace(
-        state,
+        {"react_trace": react_trace},
         f"generate: prompt_docs={len(prompt_documents)} cited_docs={len(cited_documents)}",
     )
 

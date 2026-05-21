@@ -63,7 +63,63 @@ EXTRACTED_KEYWORD_HEADING_RE = re.compile(
 )
 
 
+# Phase 1: Text hygiene and cleanup (noise reduction).
+def is_running_header_or_footer_line(line: str) -> bool:
+    """Heuristic to drop page numbers and running headers/footers."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    if re.fullmatch(r"\d{1,3}", stripped):
+        return True
+
+    without_page_no = re.sub(r"\d{1,3}$", "", stripped).strip()
+    letters = [char for char in without_page_no if char.isalpha()]
+    if len(letters) < 20:
+        return False
+
+    upper_ratio = sum(1 for char in letters if char.isupper()) / len(letters)
+    return upper_ratio >= 0.9
+
+
+def cleanup_extracted_text_artifacts(extracted_text: str) -> str:
+    """Remove obvious header/footer noise from extracted text."""
+    lines = extracted_text.splitlines()
+    cleaned: list[str] = []
+
+    for line in lines:
+        if is_running_header_or_footer_line(line):
+            continue
+        cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
+def is_reference_heading_line(line: str) -> bool:
+    """Detect a references/bibliography heading line."""
+    stripped = line.strip()
+    if not stripped:
+        return False
+
+    candidate = re.sub(r"^#+\s*", "", stripped)
+    candidate = candidate.replace("**", "").replace("__", "").replace("`", "")
+    candidate = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[ivx]{1,8})[\)\.\-:]?\s+", "", candidate, flags=re.I)
+    candidate = re.sub(r"\s+", " ", candidate).strip().lower()
+
+    return candidate.startswith("references") or candidate.startswith("bibliography")
+
+
+def truncate_text_at_references(extracted_text: str) -> str:
+    """Trim everything after the references section header."""
+    lines = extracted_text.splitlines()
+    for index, line in enumerate(lines):
+        if is_reference_heading_line(line):
+            return "\n".join(lines[:index]).strip()
+    return extracted_text
+
+
 def normalize_pdf_text(value: str) -> str:
+    """Normalize whitespace and dehyphenate line breaks."""
     text = value.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"-\n(?=[a-z])", "", text)
     text = re.sub(r"[ \t]+\n", "\n", text)
@@ -72,7 +128,9 @@ def normalize_pdf_text(value: str) -> str:
     return text.strip()
 
 
+# Phase 2: Semantic section detection (finding headings).
 def canonical_heading_key(title: str) -> str:
+    """Normalize a heading for keyword comparison."""
     lowered = title.strip().lower()
     lowered = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[ivx]{1,8})[\)\.\-:]?\s+", "", lowered)
     lowered = re.sub(r"\s+", " ", lowered)
@@ -80,6 +138,7 @@ def canonical_heading_key(title: str) -> str:
 
 
 def normalize_section_title(title: str) -> str:
+    """Clean markup and trailing punctuation from a section title."""
     cleaned = title.replace("**", "").replace("__", "").replace("`", "")
     cleaned = re.sub(r"\s+", " ", cleaned.strip())
     cleaned = re.sub(r"[ \t:\-.]+$", "", cleaned)
@@ -87,6 +146,7 @@ def normalize_section_title(title: str) -> str:
 
 
 def is_semantic_section_heading(title: str) -> bool:
+    """Validate headings using keywords and numbering heuristics."""
     candidate = normalize_section_title(title)
     normalized = canonical_heading_key(candidate)
     if normalized in MAJOR_SECTION_KEYWORDS:
@@ -102,13 +162,43 @@ def is_semantic_section_heading(title: str) -> bool:
 
 
 def should_exclude_section(title: str, exclude_references: bool) -> bool:
+    """Filter out references/appendix sections when configured."""
     if not exclude_references:
         return False
     normalized = canonical_heading_key(title)
     return any(normalized.startswith(keyword) for keyword in EXCLUDE_SECTION_KEYWORDS)
 
 
+def detect_heading_from_extracted_line(line: str) -> str | None:
+    """Extract a section heading from a line when it matches known patterns."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    for pattern, require_semantic_check in (
+        (EXTRACTED_SENTINEL_HEADING_RE, True),
+        (EXTRACTED_MARKDOWN_HEADING_RE, True),
+        (EXTRACTED_NUMBERED_HEADING_RE, False),
+        (EXTRACTED_KEYWORD_HEADING_RE, False),
+    ):
+        match = pattern.match(stripped)
+        if not match:
+            continue
+
+        title = normalize_section_title(match.group("title"))
+        if require_semantic_check and not is_semantic_section_heading(title):
+            continue
+        is_numeric_title = bool(re.fullmatch(r"(?:\d+(?:\.\d+){0,5}|[ivx]{1,8})", title, flags=re.I))
+        min_len = 1 if is_numeric_title else 2
+        if min_len <= len(title) <= 140:
+            return title
+
+    return None
+
+
+# Phase 3: Oversized content splitting.
 def split_index_on_word_boundary(text: str, start: int, max_chars: int) -> int:
+    """Find a safe split point near max_chars without cutting words."""
     end = min(len(text), start + max_chars)
     if end >= len(text):
         return len(text)
@@ -124,25 +214,8 @@ def split_index_on_word_boundary(text: str, start: int, max_chars: int) -> int:
     return start + last_space
 
 
-def overlap_suffix_on_word_boundary(text: str, overlap_chars: int) -> str:
-    if not text or overlap_chars <= 0:
-        return ""
-
-    start = max(0, len(text) - overlap_chars)
-    if start > 0 and start < len(text) and text[start - 1].isalnum() and text[start].isalnum():
-        while start < len(text) and text[start].isalnum():
-            start += 1
-        while start < len(text) and text[start].isspace():
-            start += 1
-
-    suffix = text[start:].strip()
-    if suffix:
-        return suffix
-
-    return text[-overlap_chars:].strip()
-
-
 def split_oversized_content(content: str, max_chars: int) -> list[str]:
+    """Split long sections into smaller, word-safe chunks."""
     paragraphs = [part.strip() for part in re.split(r"\n{2,}", content) if part and part.strip()]
     if not paragraphs:
         paragraphs = [part.strip() for part in re.split(r"(?<=[.!?])\s+", content) if part and part.strip()]
@@ -185,7 +258,28 @@ def split_oversized_content(content: str, max_chars: int) -> list[str]:
     return chunks
 
 
+# Phase 4: Context overlapping.
+def overlap_suffix_on_word_boundary(text: str, overlap_chars: int) -> str:
+    """Extract a clean suffix used to overlap adjacent chunks."""
+    if not text or overlap_chars <= 0:
+        return ""
+
+    start = max(0, len(text) - overlap_chars)
+    if start > 0 and start < len(text) and text[start - 1].isalnum() and text[start].isalnum():
+        while start < len(text) and text[start].isalnum():
+            start += 1
+        while start < len(text) and text[start].isspace():
+            start += 1
+
+    suffix = text[start:].strip()
+    if suffix:
+        return suffix
+
+    return text[-overlap_chars:].strip()
+
+
 def apply_chunk_overlap(parts: list[str], overlap_chars: int) -> list[str]:
+    """Blend adjacent chunks by prefixing a suffix overlap."""
     if overlap_chars <= 0 or len(parts) <= 1:
         return parts
 
@@ -202,83 +296,7 @@ def apply_chunk_overlap(parts: list[str], overlap_chars: int) -> list[str]:
     return overlapped
 
 
-def detect_heading_from_extracted_line(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped:
-        return None
-
-    for pattern, require_semantic_check in (
-        (EXTRACTED_SENTINEL_HEADING_RE, True),
-        (EXTRACTED_MARKDOWN_HEADING_RE, True),
-        (EXTRACTED_NUMBERED_HEADING_RE, False),
-        (EXTRACTED_KEYWORD_HEADING_RE, False),
-    ):
-        match = pattern.match(stripped)
-        if not match:
-            continue
-
-        title = normalize_section_title(match.group("title"))
-        if require_semantic_check and not is_semantic_section_heading(title):
-            continue
-        is_numeric_title = bool(re.fullmatch(r"(?:\d+(?:\.\d+){0,5}|[ivx]{1,8})", title, flags=re.I))
-        min_len = 1 if is_numeric_title else 2
-        if min_len <= len(title) <= 140:
-            return title
-
-    return None
-
-
-def is_reference_heading_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    candidate = re.sub(r"^#+\s*", "", stripped)
-    candidate = candidate.replace("**", "").replace("__", "").replace("`", "")
-    candidate = re.sub(r"^\s*(?:\d+(?:\.\d+){0,3}|[ivx]{1,8})[\)\.\-:]?\s+", "", candidate, flags=re.I)
-    candidate = re.sub(r"\s+", " ", candidate).strip().lower()
-
-    return candidate.startswith("references") or candidate.startswith("bibliography")
-
-
-def is_running_header_or_footer_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return False
-
-    if re.fullmatch(r"\d{1,3}", stripped):
-        return True
-
-    without_page_no = re.sub(r"\d{1,3}$", "", stripped).strip()
-    letters = [char for char in without_page_no if char.isalpha()]
-    if len(letters) < 20:
-        return False
-
-    upper_ratio = sum(1 for char in letters if char.isupper()) / len(letters)
-    return upper_ratio >= 0.9
-
-
-def cleanup_extracted_text_artifacts(extracted_text: str) -> str:
-    lines = extracted_text.splitlines()
-    cleaned: list[str] = []
-
-
-    for line in lines:
-        if is_running_header_or_footer_line(line):
-            continue
-
-        cleaned.append(line)
-
-    return "\n".join(cleaned).strip()
-
-def truncate_text_at_references(extracted_text: str) -> str:
-    lines = extracted_text.splitlines()
-    for index, line in enumerate(lines):
-        if is_reference_heading_line(line):
-            return "\n".join(lines[:index]).strip()
-    return extracted_text
-
-
+# Phase 5: The master orchestrator.
 def chunk_sections_from_extracted_text(
     extracted_text: str,
     min_chars: int,
@@ -286,6 +304,7 @@ def chunk_sections_from_extracted_text(
     chunk_overlap_chars: int,
     exclude_references: bool,
 ) -> list[dict[str, Any]]:
+    """End-to-end pipeline for cleaning, splitting, and chunking extracted text."""
     if not extracted_text.strip():
         return []
 

@@ -35,7 +35,7 @@ if (-not (Test-Path (Join-Path $root "frontend\node_modules"))) {
     Set-Location $root
 }
 
-$backendCommand = "Set-Location '$root\backend'; & '$venvPython' -m uvicorn main:app --reload --port 8000"
+$backendCommand = "Set-Location '$root'; & '$venvPython' -m uvicorn backend.main:app --reload --port 8000"
 $frontendCommand = "Set-Location '$root\frontend'; npm run dev"
 
 Write-Host "[4/4] Launching backend and frontend terminals..." -ForegroundColor Cyan
