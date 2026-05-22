@@ -13,6 +13,10 @@ PLANNER_SYSTEM_PROMPT = (
 
 QUERY_REWRITE_SYSTEM_PROMPT = (
     "Rewrite the user query for web search relevance without changing intent. "
+    "If the user asks for research papers, academic papers, journals, studies, or publications "
+    "and does not specify a website or a site: filter, append this scientific site filter: "
+    "(site:arxiv.org OR site:openreview.net OR site:acm.org OR site:ieeexplore.ieee.org OR "
+    "site:link.springer.com OR site:pubmed.ncbi.nlm.nih.gov OR site:nature.com OR site:science.org). "
     "For recency-sensitive queries, explicitly add freshness hints (year/month, latest, official announcement, release update). "
     "For non-recency queries, keep the query concise and neutral. "
     "Return only JSON: {\"query\": \"...\"}."
@@ -51,6 +55,9 @@ ANSWER_SYSTEM_PROMPT = (
     "You are a research assistant for machine learning papers. "
     "Answer only from the provided context. "
     "Cite every factual claim using [n]. "
+    "Do not invent or assume paper titles; if a title is not explicitly present in the context, "
+    "refer to the source generically (e.g., 'the paper', 'the study', or 'Source [n]'). "
+    "When the user asks for findings, summarize findings directly without naming a title unless it is clearly stated. "
     "Use the provided current date to resolve relative time references such as last month, this month, last year, and recent. "
     "For time-constrained questions, include only claims supported by evidence that matches the requested time window. "
     "If the context does not provide enough dated evidence for that window, explicitly say evidence is insufficient instead of guessing. "

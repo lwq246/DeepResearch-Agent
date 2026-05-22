@@ -161,11 +161,10 @@ TEST_CASES: list[TestCase] = [
         case_id="T10",
         question_type="Web Fallback - Real-Time",
         question=(
-            "Search online to provide an update: What are the latest major multimodal "
-            "AI model releases this year (2026)?"
+            "What were the biggest AI product launches last month? Search online."
         ),
         expected_ground_truth=(
-            "Returns a summarized list of live 2026 multimodal AI releases from the internet."
+            "Returns a summarized list of AI released in April 2026"
         ),
     ),
 ]
@@ -521,9 +520,9 @@ def print_summary(results: list[TestResult]) -> None:
     print()
     print("=== Golden QA Evaluation Summary ===")
     print(
-        f"{'Case':<6} {'Type':<18} {'LLM':<8} {'Score':<8} {'Latency(s)':<11} {'Sources':<8} {'Evidence':<9} {'WebTry':<7}"
+        f"{'Case':<6} {'Type':<28} {'LLM':<8} {'Score':<8} {'Latency(s)':<11} {'Sources':<8} {'Evidence':<9} {'WebTry':<7}"
     )
-    print("-" * 98)
+    print("-" * 108)
 
     for result in results:
         llm_status = "PASS" if result.passed else "FAIL"
@@ -531,14 +530,14 @@ def print_summary(results: list[TestResult]) -> None:
         evidence = "-" if result.evidence_ok is None else str(result.evidence_ok)
         web_try = "-" if result.web_attempts is None else str(result.web_attempts)
         print(
-            f"{result.case_id:<6} {result.question_type:<18} {llm_status:<8} {score_label:<8} "
+            f"{result.case_id:<6} {result.question_type:<28} {llm_status:<8} {score_label:<8} "
             f"{result.latency_seconds:<11.2f} {result.source_count:<8} {evidence:<9} {web_try:<7}"
         )
 
     total = len(results)
     passed = sum(1 for item in results if case_passed(item))
     failed = total - passed
-    print("-" * 98)
+    print("-" * 108)
     print("Primary judge: LLM")
     print(f"Passed: {passed}/{total} | Failed: {failed}/{total}")
 

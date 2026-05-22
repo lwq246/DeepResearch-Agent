@@ -81,16 +81,19 @@ def llm_rewrite_web_query(
             "Use complementary keywords, aliases, or source-focused phrasing."
         )
 
+    prompt_lines = [
+        f"Current date: {current_date_iso()}",
+        f"User question: {question}",
+    ]
+    if question.strip().casefold() != default_query.strip().casefold():
+        prompt_lines.append(f"Default rewritten query: {default_query}")
+    if retry_hint:
+        prompt_lines.append(retry_hint.strip())
+
     parsed = llm_json_response(
         llm=get_query_rewrite_llm(),
         system_prompt=QUERY_REWRITE_SYSTEM_PROMPT,
-        human_prompt=(
-            f"Current date: {current_date_iso()}\n"
-            f"User question: {question}\n"
-            f"Default rewritten query: {default_query}\n"
-            f"{retry_hint}\n"
-            "Prefer concise wording and include freshness hints only when useful."
-        ),
+        human_prompt="\n".join(prompt_lines),
     )
     if not parsed:
         if attempt_index <= 0:

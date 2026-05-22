@@ -118,7 +118,7 @@ def main() -> int:
     args = parse_args()
     load_dotenv()
 
-    qdrant_url = args.url or required_env("QDRANT_URL")
+    qdrant_url = "http://localhost:6333"
     collection = args.collection or required_env("QDRANT_COLLECTION")
 
     client = QdrantClient(url=qdrant_url)

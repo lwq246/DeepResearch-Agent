@@ -14,7 +14,7 @@ const body = Space_Grotesk({
 });
 
 export const metadata: Metadata = {
-  title: "ArXiv RAG Agent",
+  title: "DeepResearch RAG Agent",
   description: "Qdrant + LangGraph + Tavily research assistant",
 };
 

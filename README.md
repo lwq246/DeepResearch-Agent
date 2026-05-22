@@ -11,7 +11,7 @@ The system is designed for evidence-first answers: every response is grounded in
 
 ## Core Capabilities
 
-- Agentic routing with explicit nodes (`react_plan`, `retrieve`, `web_search`, `validate_evidence`, `build_context`, `generate`)
+- Agentic routing with explicit nodes (`react_plan`, `retrieve`, `web_search`, `validate_evidence`, `generate`)
 - Hybrid evidence strategy: local-first retrieval with controlled web fallback when evidence is insufficient
 - Prompt-driven web-only intent detection (`requires_web`) in planner and reflection steps
 - Retry-aware web query rewriting to avoid repeating weak search intents across attempts
